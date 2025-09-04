@@ -182,6 +182,34 @@ message TWriteDataRequest
 
     // Bytes to write start at buffer offset.
     uint32 BufferOffset = 7;
+message TWriteDataZCBaseRequest
+{
+    // Optional request headers.
+    THeaders Headers = 1;
+
+    // FileSystem identifier.
+    bytes FileSystemId = 2;
+
+    // Node.
+    uint64 NodeId = 3;
+
+    // IO handle.
+    uint64 Handle = 4;
+
+    // Starting offset for write.
+    uint64 Offset = 5;
+
+    // Buffer with bytes to write.
+    bytes Buffer = 6;
+
+    // Bytes to write start at buffer offset.
+    uint32 BufferOffset = 7;
+
+
+    //uint64 Size = 8;
+    //repeated TBufferPtr BufferPtr = 9;
+
+
 }
 
 message TWriteDataResponse

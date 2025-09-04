@@ -425,5 +425,14 @@ void TIndexTabletActor::CompleteTx_WriteData(
     auto actorId = NCloud::Register(ctx, std::move(actor));
     WorkerActors.insert(actorId);
 }
+void TIndexTabletActor::HandleWriteDataZC(
+    const TEvService::TEvWriteDataZCRequest ::TPtr& ev,
+    const NActors ::TActorContext& ctx)
+{
+    Y_UNUSED(ev, ctx);
+
+    auto* msg = ev->Get();
+    // TODO
+}
 
 }   // namespace NCloud::NFileStore::NStorage

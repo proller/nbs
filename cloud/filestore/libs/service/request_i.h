@@ -61,6 +61,14 @@ struct TWriteDataLocalRequest
     ui64 BytesToWrite = 0;
 };
 
+struct TWriteDataZCRequest: public TWriteDataZCBaseRequest
+{
+    int inited = 0;
+
+    TVector<TArrayRef<const char>> Buffers;
+    ui64 BytesToWrite = 0;
+};
+
 using TWriteDataLocalResponse = TWriteDataResponse;
 
 }   // namespace NProto

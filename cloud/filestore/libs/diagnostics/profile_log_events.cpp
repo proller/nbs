@@ -243,6 +243,19 @@ void InitProfileLogRequestInfo(
 template <>
 void InitProfileLogRequestInfo(
     NProto::TProfileLogRequestInfo& profileLogRequest,
+    const NProto::TWriteDataZCRequest& request)
+{
+    auto* rangeInfo = profileLogRequest.AddRanges();
+    rangeInfo->SetNodeId(request.GetNodeId());
+    rangeInfo->SetHandle(request.GetHandle());
+    rangeInfo->SetOffset(request.GetOffset());
+    rangeInfo->SetBytes(request.GetBuffer().size());
+}
+
+
+template <>
+void InitProfileLogRequestInfo(
+    NProto::TProfileLogRequestInfo& profileLogRequest,
     const NProto::TWriteDataLocalRequest& request)
 {
     auto* rangeInfo = profileLogRequest.AddRanges();

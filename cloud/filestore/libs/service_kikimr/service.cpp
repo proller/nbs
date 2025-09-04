@@ -38,6 +38,16 @@ FILESTORE_REMOTE_SERVICE(FILESTORE_DECLARE_METHOD)
 
 #undef FILESTORE_DECLARE_METHOD
 
+struct TWriteDataZCMethod
+{
+    static constexpr auto RequestName = TStringBuf("WriteDataZC");
+    using TRequest = NProto ::TWriteDataZCRequest;
+    using TResponse = NProto ::TWriteDataResponse;
+    using TRequestEvent = TEvService ::TEvWriteDataZCRequest;
+    using TResponseEvent = TEvService ::TEvWriteDataResponse;
+};
+
+
 #define FILESTORE_DECLARE_METHOD(name, ...)                                    \
     struct T##name##Method                                                     \
     {                                                                          \
@@ -320,9 +330,20 @@ public:
         std::shared_ptr<NProto::TWriteDataLocalRequest> request) override
     {
         auto response = NewPromise<NProto::TWriteDataResponse>();
-        ExecuteRequest<TWriteDataMethod>(
+        const auto r = std::make_shared<NProto::TWriteDataZCRequest>();
+        r->inited = 42;
+        r->Buffers = request->Buffers;
+        r->BytesToWrite = request->BytesToWrite;
+
+        r->SetNodeId(request->GetNodeId());
+        r->SetHandle(request->GetHandle());
+        r->SetOffset(request->GetOffset());
+        *r->MutableHeaders() = request->GetHeaders();   // mov?
+        r->SetHandle(request->GetHandle());
+        r->SetFileSystemId(request->GetFileSystemId());
+        ExecuteRequest<TWriteDataZCMethod>(
             std::move(callContext),
-            std::move(request),
+            std::move(r),
             response);
         return response.GetFuture();
     }

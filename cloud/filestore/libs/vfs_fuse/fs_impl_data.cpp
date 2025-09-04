@@ -523,7 +523,9 @@ void TFileSystem::WriteBuf(
         return;
     }
 
-    if (Config->GetZeroCopyEnabled()) {
+    if (
+        1 || 
+        Config->GetZeroCopyEnabled()) {
         WriteBufLocal(callContext, req, ino, bufv, offset, fi);
         return;
     }

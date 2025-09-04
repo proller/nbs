@@ -55,6 +55,7 @@ namespace NCloud::NFileStore::NStorage {
 
 #define FILESTORE_SERVICE_REQUESTS_HANDLE(xxx, ...)                            \
     xxx(WriteData,                          __VA_ARGS__)                       \
+    xxx(WriteDataZC,                         __VA_ARGS__)                       \
     xxx(ReadData,                           __VA_ARGS__)                       \
     xxx(ListNodes,                          __VA_ARGS__)                       \
     xxx(GetNodeAttr,                        __VA_ARGS__)                       \
@@ -270,6 +271,10 @@ struct TEvService
         EvExecuteActionRequest = EvBegin + 95,
         EvExecuteActionResponse,
 
+        EvWriteDataZCRequest = EvBegin + 97,
+        EvWriteDataZCResponse,
+
+
         EvEnd
     };
 
@@ -285,6 +290,17 @@ struct TEvService
     using TEvUnregisterLocalFileStoreRequest = TRequestEvent<
         TUnregisterLocalFileStore,
         EvUnregisterLocalFileStore>;
+
+    using TEvWriteDataZCRequest =
+        TProtoRequestEvent<NProto ::TWriteDataZCRequest, EvWriteDataZCRequest>;
+    using TEvWriteDataZCResponse =
+        TProtoResponseEvent<NProto ::TWriteDataResponse, EvWriteDataZCResponse>;
+    struct TWriteDataZCMethod
+    {
+        static constexpr const char* Name = "WriteData";
+        using TRequest = TEvWriteDataZCRequest;
+        using TResponse = TEvWriteDataResponse;
+    };
 };
 
 ////////////////////////////////////////////////////////////////////////////////
