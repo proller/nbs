@@ -150,6 +150,13 @@ bool TStorageServiceActor::HandleRequests(STFUNC_SIG)
         HFunc(TEvServicePrivate::TEvSessionDestroyed, HandleSessionDestroyed);
         HFunc(TEvServicePrivate::TEvUpdateStats, HandleUpdateStats);
 
+        case TEvService ::TEvWriteDataZCRequest ::EventType: {
+            auto* x = reinterpret_cast<
+                typename TEvService ::TEvWriteDataZCRequest ::TPtr*>(&ev);
+            HandleWriteDataZC(*x, this->ActorContext());
+            break;
+        };
+
         default:
             return false;
     }

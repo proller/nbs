@@ -270,6 +270,9 @@ struct TEvService
         EvExecuteActionRequest = EvBegin + 95,
         EvExecuteActionResponse,
 
+        EvWriteDataZCRequest = EvBegin + 97,
+        EvWriteDataZCResponse,
+
         EvEnd
     };
 
@@ -285,6 +288,18 @@ struct TEvService
     using TEvUnregisterLocalFileStoreRequest = TRequestEvent<
         TUnregisterLocalFileStore,
         EvUnregisterLocalFileStore>;
+
+    using TEvWriteDataZCRequest =
+        TProtoRequestEvent<NProto ::TWriteDataZCRequest, EvWriteDataZCRequest>;
+    using TEvWriteDataZCResponse = TProtoResponseEvent<
+        NProto ::TWriteDataZCResponse,
+        EvWriteDataZCResponse>;
+    struct TWriteDataZCMethod
+    {
+        static constexpr const char* Name = "WriteData";
+        using TRequest = TEvWriteDataZCRequest;
+        using TResponse = TEvWriteDataZCResponse;
+    };
 };
 
 ////////////////////////////////////////////////////////////////////////////////

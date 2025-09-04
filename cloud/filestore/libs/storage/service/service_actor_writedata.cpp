@@ -476,6 +476,12 @@ private:
 
 ////////////////////////////////////////////////////////////////////////////////
 
+void TStorageServiceActor::HandleWriteDataZC(
+    const TEvService::TEvWriteDataZCRequest::TPtr& ev,
+    const TActorContext& ctx)
+{
+}
+
 void TStorageServiceActor::HandleWriteData(
     const TEvService::TEvWriteDataRequest::TPtr& ev,
     const TActorContext& ctx)

@@ -243,6 +243,19 @@ void InitProfileLogRequestInfo(
 template <>
 void InitProfileLogRequestInfo(
     NProto::TProfileLogRequestInfo& profileLogRequest,
+    const NProto::TWriteDataZCRequest& request)
+{
+    auto* rangeInfo = profileLogRequest.AddRanges();
+    rangeInfo->SetNodeId(request.GetNodeId());
+    rangeInfo->SetHandle(request.GetHandle());
+    rangeInfo->SetOffset(request.GetOffset());
+    rangeInfo->SetBytes(request.GetBuffer().size());
+}
+
+
+template <>
+void InitProfileLogRequestInfo(
+    NProto::TProfileLogRequestInfo& profileLogRequest,
     const NProto::TWriteDataLocalRequest& request)
 {
     auto* rangeInfo = profileLogRequest.AddRanges();
@@ -523,7 +536,13 @@ void InitProfileLogRequestInfo(
     IMPLEMENT_DEFAULT_METHOD(DestroyHandle, NProto)
     IMPLEMENT_DEFAULT_METHOD(AcquireLock, NProto)
     IMPLEMENT_DEFAULT_METHOD(ReleaseLock, NProto)
-    IMPLEMENT_DEFAULT_METHOD(WriteData, NProto)
+    template <>
+    void FinalizeProfileLogRequestInfo(
+        NProto ::TProfileLogRequestInfo& profileLogRequest,
+        const NProto ::TWriteDataResponse& response)
+    {
+        Y_UNUSED(profileLogRequest, response);
+    }
     IMPLEMENT_DEFAULT_METHOD(AllocateData, NProto)
     IMPLEMENT_DEFAULT_METHOD(StartEndpoint, NProto)
     IMPLEMENT_DEFAULT_METHOD(StopEndpoint, NProto)
