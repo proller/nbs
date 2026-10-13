@@ -1,7 +1,7 @@
 #include <cloud/filestore/libs/service/filestore.h>
 #include <cloud/filestore/libs/storage/fastshard/iface/fs.h>
 #include <cloud/filestore/libs/storage/fastshard/impl/hash_table_index/shard.h>
-#include <cloud/filestore/libs/storage/fastshard/sn/factory/group_factory.h>
+#include <cloud/filestore/libs/storage/fastshard/storage_group/storage_group_factory.h>
 #include <cloud/filestore/private/api/protos/tablet.pb.h>
 
 #include <cloud/storage/core/libs/common/error.h>
@@ -104,7 +104,7 @@ struct TStorageFixture
         //
 
         auto* group = Config.AddStorageGroups();
-        group->SetType(NProtoPrivate::TStorageGroup::E_SG_MIRROR);
+        group->SetType(NFileStore::NProto::FAST_SHARD_STORAGE_MIRROR);
         for (ui32 i = 1; i <= 3; ++i) {
             auto* device = group->AddDevices();
             device->SetHost("host-" + ToString(i));
@@ -143,7 +143,7 @@ TEST(HashTableIndexShardLayoutTest, DumpsLayout)
     NJson::TJsonValue parsed;
     ASSERT_TRUE(NJson::ReadJsonTree(json.Str(), &parsed)) << json.Str();
     const auto& components = parsed["components"].GetArray();
-    ASSERT_EQ(6u, components.size()) << json.Str();
+    ASSERT_EQ(7u, components.size()) << json.Str();
 
     //
     // The components must cover the group contiguously in the
@@ -152,46 +152,54 @@ TEST(HashTableIndexShardLayoutTest, DumpsLayout)
 
     {
         const auto& c = components[0];
-        EXPECT_EQ("NodeTable", c["name"].GetString());
+        EXPECT_EQ("SuperBlock", c["name"].GetString());
         EXPECT_EQ(0ULL, c["offsetBytes"].GetUInteger());
+        EXPECT_EQ(8_KB, c["sizeBytes"].GetUInteger());
+        EXPECT_EQ(1ULL, c["slotCount"].GetUInteger());
+    }
+
+    {
+        const auto& c = components[1];
+        EXPECT_EQ("NodeTable", c["name"].GetString());
+        EXPECT_EQ(8_KB, c["offsetBytes"].GetUInteger());
         EXPECT_EQ(12_KB, c["sizeBytes"].GetUInteger());
         EXPECT_EQ(84ULL, c["slotCount"].GetUInteger());
     }
 
     {
-        const auto& c = components[1];
+        const auto& c = components[2];
         EXPECT_EQ("NameTable", c["name"].GetString());
-        EXPECT_EQ(12_KB, c["offsetBytes"].GetUInteger());
+        EXPECT_EQ(20_KB, c["offsetBytes"].GetUInteger());
         EXPECT_EQ(8_KB, c["sizeBytes"].GetUInteger());
         EXPECT_EQ(85ULL, c["slotCount"].GetUInteger());
     }
 
     {
-        const auto& c = components[2];
+        const auto& c = components[3];
         EXPECT_EQ("HandleTable", c["name"].GetString());
-        EXPECT_EQ(20_KB, c["offsetBytes"].GetUInteger());
+        EXPECT_EQ(28_KB, c["offsetBytes"].GetUInteger());
         EXPECT_EQ(20_KB, c["sizeBytes"].GetUInteger());
         EXPECT_EQ(1024ULL, c["slotCount"].GetUInteger());
     }
 
     {
-        const auto& c = components[3];
+        const auto& c = components[4];
         EXPECT_EQ("PageIndex", c["name"].GetString());
-        EXPECT_EQ(40_KB, c["offsetBytes"].GetUInteger());
+        EXPECT_EQ(48_KB, c["offsetBytes"].GetUInteger());
         EXPECT_EQ(56_KB, c["sizeBytes"].GetUInteger());
         EXPECT_EQ(2210ULL, c["slotCount"].GetUInteger());
     }
 
     {
-        const auto& c = components[4];
+        const auto& c = components[5];
         EXPECT_EQ("PageAllocatorBitmap", c["name"].GetString());
-        EXPECT_EQ(96_KB, c["offsetBytes"].GetUInteger());
+        EXPECT_EQ(104_KB, c["offsetBytes"].GetUInteger());
         EXPECT_EQ(8_KB, c["sizeBytes"].GetUInteger());
         EXPECT_EQ(2048ULL, c["slotCount"].GetUInteger());
     }
 
     {
-        const auto& c = components[5];
+        const auto& c = components[6];
         EXPECT_EQ("DataPages", c["name"].GetString());
         EXPECT_EQ(128_KB, c["offsetBytes"].GetUInteger());
         EXPECT_EQ(64_MB, c["sizeBytes"].GetUInteger());
@@ -205,7 +213,7 @@ TEST(HashTableIndexShardLayoutTest, DumpsLayout)
     {
         const auto& groups = parsed["storageGroups"].GetArray();
         ASSERT_EQ(1u, groups.size()) << json.Str();
-        EXPECT_EQ("E_SG_MIRROR", groups[0]["type"].GetString());
+        EXPECT_EQ("FAST_SHARD_STORAGE_MIRROR", groups[0]["type"].GetString());
 
         const auto& devices = groups[0]["devices"].GetArray();
         ASSERT_EQ(3u, devices.size()) << json.Str();
@@ -222,6 +230,7 @@ TEST(HashTableIndexShardLayoutTest, DumpsLayout)
     //
 
     const TVector<TString> expectedNames = {
+        "SuperBlock",
         "NodeTable",
         "NameTable",
         "HandleTable",
@@ -252,7 +261,7 @@ TEST(HashTableIndexShardLayoutTest, DumpsLayout)
         || html.Str().Contains("fastShardStatsJson")) << html.Str();
 
     EXPECT_TRUE(html.Str().Contains("Storage Groups")) << html.Str();
-    EXPECT_TRUE(html.Str().Contains("<td>E_SG_MIRROR</td>")) << html.Str();
+    EXPECT_TRUE(html.Str().Contains("<td>FAST_SHARD_STORAGE_MIRROR</td>")) << html.Str();
     for (ui32 i = 1; i <= 3; ++i) {
         EXPECT_TRUE(
             html.Str().Contains("<td>host-" + ToString(i) + "</td>"))

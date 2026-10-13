@@ -1,10 +1,12 @@
 #include "null_storage_group.h"
 
-#include <cloud/filestore/libs/storage/fastshard/sn/factory/group_factory.h>
+#include <cloud/filestore/libs/storage/fastshard/storage_group/storage_group_factory.h>
 
 #include <silk/fibers/fiber.h>
 
 namespace NCloud::NFileStore::NStorage::NFastShard {
+
+using NCloud::NFastShard::IDelayPolicyPtr;
 
 namespace {
 

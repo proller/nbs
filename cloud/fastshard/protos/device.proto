@@ -25,6 +25,12 @@ message TDeviceResponseHeaders
 ////////////////////////////////////////////////////////////////////////////////
 // Acquire request/response.
 
+enum EAccessMode
+{
+    ACCESS_READ_WRITE = 0;
+    ACCESS_READ_ONLY = 1;
+}
+
 message TAcquireDevicesRequest
 {
     // Headers.
@@ -33,13 +39,16 @@ message TAcquireDevicesRequest
     // List of device UUIDs to acquire.
     repeated string DeviceUUIDs = 2;
 
-    // Writer generation. A writer with a lower generation than the one that
-    // currently holds the devices is rejected.
-    uint64 Generation = 3;
+    // Generation of the client. The storage node remembers the generation of
+    // the last acquire or release per device and rejects a request from the
+    // same client with a lower generation. 0 disables the check.
+    uint32 Generation = 3;
+
+    // Identifier of the fastshard the devices belong to.
+    string FastshardId = 4;
 
     // Access mode.
-    // Let's just assume r/w access for now.
-    // EAccessMode AccessMode = 2;
+    EAccessMode AccessMode = 5;
 }
 
 message TAcquireDevicesResponse
@@ -61,9 +70,39 @@ message TReleaseDevicesRequest
 
     // List of device UUIDs to release.
     repeated string DeviceUUIDs = 2;
+
+    // Generation of the client.
+    uint32 Generation = 3;
+
+    // Identifier of the fastshard the devices belong to.
+    string FastshardId = 4;
 }
 
 message TReleaseDevicesResponse
+{
+    // Headers.
+    TDeviceResponseHeaders Headers = 1;
+
+    // Optional error, set only if error happened.
+    TError Error = 2;
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// Device format request/response.
+
+message TFormatDeviceRequest
+{
+    // Headers.
+    TDeviceRequestHeaders Headers = 1;
+
+    // UUID of the device to format.
+    string DeviceUUID = 2;
+
+    // Zero the whole device instead of the journal metadata only.
+    bool WholeDevice = 3;
+}
+
+message TFormatDeviceResponse
 {
     // Headers.
     TDeviceResponseHeaders Headers = 1;
@@ -241,6 +280,7 @@ message TDeviceProtocolRequest
         TWriteLogRecordRequest WriteLogRecord = 5;
         TReadJournalTailRequest ReadJournalTail = 6;
         TAdvanceLsnLowWatermarkRequest AdvanceLsnLowWatermark = 7;
+        TFormatDeviceRequest FormatDevice = 8;
     }
 }
 
@@ -258,5 +298,6 @@ message TDeviceProtocolResponse
         TWriteLogRecordResponse WriteLogRecord = 6;
         TReadJournalTailResponse ReadJournalTail = 7;
         TAdvanceLsnLowWatermarkResponse AdvanceLsnLowWatermark = 8;
+        TFormatDeviceResponse FormatDevice = 9;
     }
 }

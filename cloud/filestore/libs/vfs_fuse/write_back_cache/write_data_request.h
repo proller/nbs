@@ -41,34 +41,62 @@ protected:
 
 ////////////////////////////////////////////////////////////////////////////////
 
+// A pending request is externally owned (by TNodeCache in production) until
+// it is either promoted to a cached request or rejected.
+// TWriteDataRequestManager, THandleState and TQueuedOperations keep only
+// non-owning pointers. In particular, an allocated request must remain alive
+// while TQueuedOperations serializes it without the cache-state lock.
 class TPendingWriteDataRequest
     : public TWriteDataRequestBase<TPendingWriteDataRequest>
     , public TIntrusiveListItem<TPendingWriteDataRequest, THandleStateTag>
 {
 private:
+    friend class TWriteDataRequestManager;
+
     std::shared_ptr<NProto::TWriteDataRequest> Request;
 
     NThreading::TPromise<NProto::TWriteDataResponse> Promise =
         NThreading::NewPromise<NProto::TWriteDataResponse>();
 
+    // Private fields accessed directly by TWriteDataRequestManager
+    char* AllocationPtr = nullptr;
+    size_t AllocationByteCount = 0;
+    ui32 Checksum = 0;
+    std::atomic<bool> Serialized = false;
+
 public:
     TPendingWriteDataRequest(
         ui64 sequenceId,
         TInstant time,
-        std::shared_ptr<NProto::TWriteDataRequest> request)
-        : TWriteDataRequestBase(sequenceId, time)
-        , Request(std::move(request))
-    {}
+        std::shared_ptr<NProto::TWriteDataRequest> request);
 
     const NProto::TWriteDataRequest& GetRequest() const
     {
         return *Request;
     }
 
+    ui64 GetNodeId() const
+    {
+        return Request->GetNodeId();
+    }
+
+    ui64 GetHandle() const
+    {
+        return Request->GetHandle();
+    }
+
     NThreading::TPromise<NProto::TWriteDataResponse>& AccessPromise()
     {
         return Promise;
     }
+
+    bool HasAllocation() const
+    {
+        return AllocationPtr != nullptr;
+    }
+
+    // Serializes the request into its persistent storage allocation.
+    void SerializeToAllocation();
 };
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -107,6 +135,9 @@ public:
                   allocationPtr))
         , SerializedData(serializedData)
     {}
+
+    static std::unique_ptr<TCachedWriteDataRequest>
+    CreateFromAllocation(ui64 sequenceId, TInstant time, TStringBuf allocation);
 
     const void* GetAllocationPtr() const
     {

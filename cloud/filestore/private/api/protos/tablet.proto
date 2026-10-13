@@ -3,6 +3,7 @@ syntax = "proto3";
 import "cloud/storage/core/protos/error.proto";
 import "cloud/storage/core/protos/media.proto";
 import "cloud/filestore/public/api/protos/fs.proto";
+import "cloud/filestore/public/api/protos/filesystem_event.proto";
 import "cloud/filestore/public/api/protos/headers.proto";
 import "cloud/filestore/public/api/protos/node.proto";
 import "cloud/filestore/public/api/protos/quota.proto";
@@ -685,9 +686,15 @@ message TForcedOperationRequest
 {
     enum EForcedOperationType
     {
+        // Range operations
         E_COMPACTION = 0;
         E_CLEANUP = 1;
         E_DELETE_EMPTY_RANGES = 2;
+
+        // Tablet operations
+        E_FLUSH = 3;
+        E_FLUSH_BYTES = 4; // Only use when no concurrent writes are possible
+        E_COLLECT_GARBAGE = 5;
     };
 
     // Optional request headers.
@@ -700,10 +707,11 @@ message TForcedOperationRequest
     EForcedOperationType OpType = 3;
 
     // Enables processing of all ranges - even the ranges whose compaction
-    // stats are zero.
+    // stats are zero. Used for range operations
     bool ProcessAllRanges = 4;
 
     // Starts from the min RangeId whose value is >= MinRangeId.
+    // Used for range operations
     uint32 MinRangeId = 5;
 }
 
@@ -713,6 +721,7 @@ message TForcedOperationResponse
     NCloud.NProto.TError Error = 1;
 
     // Affected range count.
+    // Set for range operations.
     uint64 RangeCount = 2;
 
     // Can be used to query operation status.
@@ -737,13 +746,16 @@ message TForcedOperationStatusResponse
     NCloud.NProto.TError Error = 1;
 
     // Affected range count.
+    // Set for range operations
     uint64 RangeCount = 2;
 
     // Processed range count.
+    // Set for range operations
     uint64 ProcessedRangeCount = 3;
 
     // Last processed range id. Can be used to skip processed range ids upon
     // operation restart via the MinRangeId parameter.
+    // Set for range operations
     uint32 LastProcessedRangeId = 4;
 
     // Operation status summary
@@ -808,20 +820,8 @@ message TStorageDevice
 
 message TStorageGroup
 {
-    enum EStorageGroupType
-    {
-        // Mirrors every write into all devices and waits for all of them.
-        // Reads are served by a single device, round-robin.
-        E_SG_MIRROR = 0;
-
-        // Mirrors every write into all devices but acks after n/m write acks.
-        // Reads are served by any device that has caught up to the last
-        // quorum-acked record.
-        E_SG_QUORUM_MIRROR = 1;
-    };
-
     repeated TStorageDevice Devices = 1;
-    EStorageGroupType Type = 2;
+    NProto.EFastShardStorageKind Type = 2;
 }
 
 message TPersistentFastShardConfig
@@ -1017,6 +1017,8 @@ message TUnsafeGetNodeResponse
     // Optional error, set only if error happened.
     NCloud.NProto.TError Error = 1;
     NProto.TNodeAttr Node = 2;
+    // Commit id of the last modification of the node
+    uint64 CommitId = 3;
 }
 
 message TUnsafeCreateNodeRefRequest
@@ -1390,6 +1392,17 @@ message TUnlinkNodeInShardRequest
 
     // Original request that caused this unlink.
     NProto.TUnlinkNodeRequest OriginalRequest = 6;
+
+    // This flag indicates that the external node is unlinked and that directory
+    // creation in shards is enabled. It also means that the node in the leader
+    // is unlinked after the node in the shard is unlinked. The field is
+    // optional to allow requests created by the previous version
+    // to be replayed.
+    // This field is introduced because a TUnlinkNodeInShardRequest may be
+    // created while directory creation in shards is disabled and replayed after
+    // it is enabled. Thus, we need to persist how the request should be
+    // processed at the time it is created.
+    optional bool ShouldUnlockUponCompletion = 7;
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -1617,4 +1630,30 @@ message TListQuotasResponse
 
     // Usage of each quota that has any recorded usage on this filesystem.
     repeated TQuotaUsage Usages = 3;
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// GenerateFileSystemEvent request/response
+
+message TGenerateFileSystemEventRequest
+{
+    // Optional request headers.
+    NProto.THeaders Headers = 1;
+
+    // FileSystem identifier.
+    string FileSystemId = 2;
+
+    // Event to send to all the tablet's clients. FileSystemId inside the
+    // event is overwritten by the tablet.
+    NProto.TFileSystemEvent Event = 3;
+}
+
+message TGenerateFileSystemEventResponse
+{
+    // Optional error, set only if error happened.
+    NCloud.NProto.TError Error = 1;
+
+    // Number of clients the event was sent to (would have been sent to in
+    // FileSystemEventsDryRunModeEnabled mode).
+    uint32 ClientCount = 2;
 }

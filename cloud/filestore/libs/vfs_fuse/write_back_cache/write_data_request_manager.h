@@ -26,23 +26,30 @@ private:
     ITimerPtr Timer;
     IWriteDataRequestManagerStatsPtr Stats;
 
-    TIntrusiveList<TPendingWriteDataRequest> PendingRequests;
+    // Non-owning lifecycle queues; callers own the requests (TNodeCache in
+    // production). Allocation is global FIFO, so every node's pending queue
+    // consists of an allocated prefix followed by an unallocated suffix.
+    // Failure paths may remove only the unallocated suffix. Allocated requests
+    // remain alive for out-of-lock serialization and leave this queue only
+    // through GetNextReadyCachedRequest().
+    TIntrusiveList<TPendingWriteDataRequest> UnallocatedPendingRequests;
+    TIntrusiveList<TPendingWriteDataRequest> AllocatedPendingRequests;
     TIntrusiveList<TCachedWriteDataRequest> UnflushedRequests;
     TIntrusiveList<TCachedWriteDataRequest> FlushedRequests;
 
     THashSet<ui64> NodesWithBackpressure;
 
 public:
-    struct TAddRequestResult
+    struct TAllocPendingRequestResult
     {
-        std::unique_ptr<TPendingWriteDataRequest> PendingRequest = nullptr;
-        std::unique_ptr<TCachedWriteDataRequest> CachedRequest = nullptr;
+        TPendingWriteDataRequest* Request = nullptr;
         bool Failed = false;
+        bool StorageIsFull = false;
     };
 
-    struct TProcessPendingRequestResult
+    struct TGetNextReadyCachedRequestResult
     {
-        std::unique_ptr<TCachedWriteDataRequest> CachedRequest = nullptr;
+        std::unique_ptr<TCachedWriteDataRequest> Request = nullptr;
         bool Failed = false;
     };
 
@@ -75,43 +82,45 @@ public:
     ui64 GetMaxUnflushedSequenceId() const;
 
     /**
-     * Adds a WriteData request to the persistent storage.
+     * Creates a pending WriteData request and adds a non-owning pointer to the
+     * unallocated queue; the returned object remains owned by the caller.
      *
-     * Returns result with non-empty TAddRequestResult::CachedRequest if the
-     * request has been successfully stored in the storage.
-     *
-     * Returns result with non-empty TAddRequestResult::PendingRequest if the
-     * the storage is full or backpressure is in effect, and the request has
-     * been added to the pending queue.
-     *
-     * Returns result with TAddRequestResult::Failed == true if the storage is
-     * in failed state.
+     * After TryAllocPendingRequest() succeeds, the serializer may hold a raw
+     * pointer while the cache-state lock is released. An allocated request
+     * must remain alive until GetNextReadyCachedRequest() removes it from
+     * AllocatedPendingRequests.
      */
-    [[nodiscard]] TAddRequestResult AddRequest(
+    [[nodiscard]] std::unique_ptr<TPendingWriteDataRequest> AddRequest(
         std::shared_ptr<NProto::TWriteDataRequest> request);
 
     /**
-     * Takes front request from the pending queue and tries to store it into
-     * the persistent storage.
+     * Tries to allocate buffer in the persistent storage for the front
+     * unallocated pending request.
      *
-     * Returns result with non-empty TProcessPendingRequestResult::CachedRequest
-     * if the front request has been successfully stored in the storage.
-     *
-     * Returns result with empty TProcessPendingRequestResult::CachedRequest and
-     * TAddRequestResult::Failed == false if the storage is full, backpressure
-     * is in effect or the pending queue is empty.
-     *
-     * Returns result with empty TProcessPendingRequestResult::CachedRequest and
-     * TAddRequestResult::Failed == true if the storage is in failed state.
+     * Returns an empty result if the queue is empty, the storage is full or
+     * backpressure is in effect. Sets Failed on a storage error.
      */
-    [[nodiscard]] TProcessPendingRequestResult TryProcessPendingRequest();
+    [[nodiscard]] TAllocPendingRequestResult TryAllocPendingRequest();
 
-    // Takes and removes front request from the pending queue.
-    // Returns the removed request or nullptr if there are no pending requests.
-    [[nodiscard]] TPendingWriteDataRequest* TryPopFrontPendingRequest();
+    /**
+     * Examines the lowest-sequence allocated request awaiting commit.
+     *
+     * If serialization is complete, commits its allocation, removes the pending
+     * request from its lifecycle queue, creates a cached request, registers it
+     * in the unflushed queue, and returns it.
+     *
+     * Returns an empty result if there are no allocated requests or the first
+     * request is not serialized yet. Sets Failed on a storage error.
+     */
+    [[nodiscard]] TGetNextReadyCachedRequestResult GetNextReadyCachedRequest();
 
-    // Removes the request from the pending queue
-    void Remove(std::unique_ptr<TPendingWriteDataRequest> request);
+    // Returns the highest-sequence unallocated pending request, or nullptr if
+    // there are no unallocated pending requests.
+    [[nodiscard]] const TPendingWriteDataRequest*
+    GetBackUnallocatedPendingRequest() const;
+
+    // Removes an unallocated request from the pending queue.
+    void RemoveUnallocated(std::unique_ptr<TPendingWriteDataRequest> request);
 
     /**
      * Marks the request as flushed
@@ -151,15 +160,13 @@ public:
     void UpdateStats() const;
 
 private:
-    TProcessPendingRequestResult TryStoreRequestInPersistentStorage(
-        ui64 sequenceId,
-        TInstant time,
-        const NProto::TWriteDataRequest& request);
+    bool HasUnallocatedPendingRequests() const;
+    bool HasAllocatedPendingRequests() const;
 
-    // Access methods that triggers stats update
-    void PendingRequestsPushBack(TPendingWriteDataRequest* request);
-    void PendingRequestsRemove(TPendingWriteDataRequest* request);
-    void PendingRequestsPopFront();
+    // Access methods that trigger stats update
+    void UnallocatedPendingRequestsPushBack(TPendingWriteDataRequest* request);
+    void UnallocatedPendingRequestsRemove(TPendingWriteDataRequest* request);
+    void AllocatedPendingRequestsRemove(TPendingWriteDataRequest* request);
     void UnflushedRequestsPushBack(TCachedWriteDataRequest* request);
     void UnflushedRequestsRemove(TCachedWriteDataRequest* request);
     void FlushedRequestsPushBack(TCachedWriteDataRequest* request);

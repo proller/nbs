@@ -655,6 +655,7 @@ void TIndexTabletActor::ExecuteTx_RenameNodeInDestination(
             // remove existing target ref
             RemoveNodeRef(
                 *db,
+                args.FileSystemEvents,
                 args.NewParentNodeId,
                 args.NewChildRef->MinCommitId,
                 args.CommitId,
@@ -682,6 +683,7 @@ void TIndexTabletActor::ExecuteTx_RenameNodeInDestination(
             // remove target ref
             UnlinkExternalNode(
                 *db,
+                args.FileSystemEvents,
                 args.NewParentNode->NodeId,
                 args.NewName,
                 args.NewChildRef->ShardId,
@@ -702,6 +704,8 @@ void TIndexTabletActor::ExecuteTx_RenameNodeInDestination(
             shardRequest->SetName(args.NewChildRef->ShardNodeName);
             shardRequest->SetUnlinkDirectory(
                 args.DestinationNodeAttr.GetType() == NProto::E_DIRECTORY_NODE);
+            shardRequest->SetShouldUnlockUponCompletion(false);
+
             const bool serialized = args.ProfileLogRequest.SerializeToString(
                 args.OpLogEntry.MutableProfileLogRequest());
             if (!serialized) {
@@ -717,6 +721,7 @@ void TIndexTabletActor::ExecuteTx_RenameNodeInDestination(
     // create target ref to source node
     CreateNodeRef(
         *db,
+        args.FileSystemEvents,
         args.NewParentNodeId,
         args.CommitId,
         args.NewName,
@@ -727,6 +732,7 @@ void TIndexTabletActor::ExecuteTx_RenameNodeInDestination(
     auto newParent = CopyAttrs(args.NewParentNode->Attrs, E_CM_CMTIME);
     UpdateNode(
         *db,
+        args.FileSystemEvents,
         args.NewParentNode->NodeId,
         args.NewParentNode->MinCommitId,
         args.CommitId,
@@ -839,8 +845,7 @@ void TIndexTabletActor::CompleteTx_RenameNodeInDestination(
                 std::move(args.ProfileLogRequest),
                 args.RequestId,
                 args.OpLogEntry.GetEntryId(),
-                std::move(args.Response),
-                false);
+                std::move(args.Response));
 
             return;
         }

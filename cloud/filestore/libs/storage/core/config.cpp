@@ -166,6 +166,7 @@ using TAliases = NProto::TStorageConfig::TFilestoreAliases;
                                                                                \
     xxx(HDDMediaKindOverride,          ui32,      2        /*HYBRID*/         )\
     xxx(MinChannelCount,               ui32,      4                           )\
+    xxx(MaxUsedDataChannelCount,       ui32,      Max<ui32>()                 )\
                                                                                \
     xxx(DefaultNodesLimit,             ui32,      4194304                     )\
     xxx(SizeToNodesRatio,              ui32,      65536    /*mke2fs huge*/    )\
@@ -312,6 +313,8 @@ using TAliases = NProto::TStorageConfig::TFilestoreAliases;
                                                                                \
     xxx(ParentlessFilesOnly,               bool,       false                  )\
     xxx(AllowHandlelessIO,                 bool,       false                  )\
+    xxx(FileSystemEventsEnabled,           bool,       false                  )\
+    xxx(FileSystemEventsDryRunModeEnabled, bool,       false                  )\
                                                                                \
     xxx(LazyXAttrsEnabled,                 bool,       false                  )\
     xxx(MaxBackground,                     ui32,       0                      )\
@@ -379,6 +382,11 @@ using TAliases = NProto::TStorageConfig::TFilestoreAliases;
     xxx(FastShardRuntimeEnabled,                bool,   false                 )\
     xxx(FastShardExtendedVerificationEnabled,   bool,   false                 )\
                                                                                \
+    xxx(FastShardDiskRegistryTabletId,      ui64,       0                     )\
+    xxx(FastShardDiskRegistryOwner,         ui64,       0                     )\
+    xxx(FastShardDiskRegistryOwnerIdx,      ui64,       0                     )\
+    xxx(FastShardDiskRegistryLookupTimeout, TDuration,  TDuration::Minutes(1) )\
+                                                                               \
     xxx(EnableNodeRefCompression,               bool,   false                 )\
                                                                                \
     xxx(SoftBackpressureEnabled,                bool,   false                 )\
@@ -400,8 +408,7 @@ using TAliases = NProto::TStorageConfig::TFilestoreAliases;
                                                                                \
     xxx(ExternalWriteDataPayloadEnabled,               bool,    false         )\
     xxx(FakeTxPageFaultsProbability,                   double,   0            )\
-                                                                               \
-    xxx(FanoutStatsCollectionInShardsDisabled,         bool,    false         )\
+    xxx(ArtificialShardPhaseDelay,                     TDuration, {}          )\
                                                                                \
     xxx(EnableLoadActor,                               bool,    false         )\
     xxx(MaxNodeDiagnosticEntries,                      ui32,    0             )\

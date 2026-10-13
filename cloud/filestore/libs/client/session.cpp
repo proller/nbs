@@ -483,7 +483,7 @@ private:
                     GetSessionParams(response);
 
                 SchedulePingSession();
-            } else if (!state->SessionId) {
+            } else {
                 SessionState = SessionBroken;
             }
         }
@@ -728,7 +728,7 @@ private:
             error.SetMessage(CurrentExceptionMessage());
         }
 
-        state->Response.SetValue(TErrorResponse(error));
+        state->Response.SetValue(TErrorResponse(std::move(error)));
    }
 
     template <typename T>

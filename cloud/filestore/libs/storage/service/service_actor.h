@@ -71,6 +71,7 @@ private:
     TCounterPtr CompletedRequestCountWithLogData;
     TCounterPtr CompletedRequestCountWithError;
     TCounterPtr CompletedRequestCountWithoutErrorOrLogData;
+    TCounterPtr HardLinkFromShardDirToMainTabletNodeCount;
 
     TCounterPtr HddFileSystemCount;
     TCounterPtr HddTabletCount;
@@ -386,6 +387,10 @@ private:
         TString input);
 
     NActors::IActorPtr CreateFastShardCommandActionActor(
+        TRequestInfoPtr requestInfo,
+        TString input);
+
+    NActors::IActorPtr CreateGenerateFileSystemEventActionActor(
         TRequestInfoPtr requestInfo,
         TString input);
 

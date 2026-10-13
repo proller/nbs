@@ -180,8 +180,9 @@ public:
     void FlushSucceeded(ui64 nodeId, size_t requestCount);
 
     // Inform that the flush has failed - the error should be propagated to
-    // Flush, FlushAll and ReleaseHandle requests.
-    // In the case of E_FS_NOSPC, pending requests will also be failed.
+    // Flush, FlushAll and ReleaseHandle requests, as well as unallocated
+    // pending WriteData requests for the node. In the case of E_FS_NOSPC,
+    // unallocated pending requests will be failed for all nodes.
     EFlushRetryStatus FlushFailed(
         ui64 nodeId,
         const NCloud::NProto::TError& error);
@@ -202,18 +203,14 @@ public:
     void UpdateStats() const;
 
 private:
+    EOperationalState GetOperationalState() const;
+
     // Combines acquiring mutex and executing queued operations on mutex release
     // TQueuedOperations has custom Release method that:
     // 1. Copies the accumulated operations to a temporary vector.
     // 2. Releases mutex.
     // 3. Executes the operations from the temporary vector.
     TGuard<TQueuedOperations> LockStateAndPostponeQueuedOperations() const;
-
-    NThreading::TFuture<NProto::TWriteDataResponse> AddRequest(
-        std::unique_ptr<TPendingWriteDataRequest> request);
-
-    NThreading::TFuture<NProto::TWriteDataResponse> AddRequest(
-        std::unique_ptr<TCachedWriteDataRequest> request);
 
     NThreading::TFuture<NProto::TWriteDataResponse> AddRequest(
         std::unique_ptr<TCachedWriteDataRequest> request,
@@ -227,7 +224,13 @@ private:
 
     void EvictUnpinnedFlushedEntries(ui64 nodeId, TNodeState& nodeState);
     void CheckAndAcquireBarriers(TNodeState& nodeState);
+
+    // Callback from QueuedOperations under lock
+    void ProcessSerializedRequests();
     void ProcessPendingRequests();
+    std::unique_ptr<TCachedWriteDataRequest> GetNextReadyCachedRequest();
+    void ProcessReadyCachedRequest(
+        std::unique_ptr<TCachedWriteDataRequest> request);
 
     void EnqueueUnflushedRequest(
         ui64 nodeId,
@@ -252,16 +255,16 @@ private:
         TNodeState& nodeState,
         const NCloud::NProto::TError& error);
 
-    void FailPendingRequest(
+    void FailUnallocatedPendingRequest(
         TNodeState& nodeState,
-        TPendingWriteDataRequest* request,
+        std::unique_ptr<TPendingWriteDataRequest> request,
         const NCloud::NProto::TError& error);
 
-    void FailNodePendingRequests(
+    void FailNodeUnallocatedPendingRequests(
         TNodeState& nodeState,
         const NCloud::NProto::TError& error);
 
-    void FailAllPendingRequests(const NCloud::NProto::TError& error);
+    void FailAllUnallocatedPendingRequests(const NCloud::NProto::TError& error);
 
     void SetFailedFlag();
 };

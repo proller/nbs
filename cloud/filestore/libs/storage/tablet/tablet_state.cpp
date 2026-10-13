@@ -226,6 +226,9 @@ void TIndexTabletState::LoadState(
     MaxTabletStep = Max(config.GetMaxTabletStep(), LastStep);
 
     CompressNodeRef = config.GetEnableNodeRefCompression();
+    FileSystemEventsEnabled = config.GetFileSystemEventsEnabled();
+    FileSystemEventsDryRunModeEnabled =
+        config.GetFileSystemEventsDryRunModeEnabled();
 
     FileSystem.CopyFrom(fileSystem);
     FileSystemStats.CopyFrom(fileSystemStats);
@@ -246,6 +249,8 @@ void TIndexTabletState::LoadState(
     }
 
     LoadChannels();
+    Impl->Channels.SetMaxUsedDataChannelCount(
+        config.GetMaxUsedDataChannelCount());
 
     Impl->RangeIdHasher = CreateHasher(fileSystem);
     Impl->ThrottlingPolicy.Reset(throttlerConfig);

@@ -155,6 +155,7 @@ class TIndexTabletActor final
         STATE_ADAPTER,
         STATE_ZOMBIE,
         STATE_BROKEN,
+        STATE_ADAPTER_BROKEN,
         STATE_MAX,
     };
 
@@ -203,6 +204,13 @@ private:
 
     TStorageConfigPtr Config;
     TDiagnosticsConfigPtr DiagConfig;
+
+    //
+    // PipeServerId -> ActorId of the client on the other side of the pipe
+    // (IndexTabletProxyActor). FileSystemEvents are sent to these clients.
+    //
+
+    THashMap<NActors::TActorId, NActors::TActorId> FileSystemEventClients;
 
     struct TCompactionStateLoadStatus
     {
@@ -359,11 +367,26 @@ private:
         const TCleanupInfo& cleanupInfo);
     void EnqueueCollectGarbageIfNeeded(const NActors::TActorContext& ctx);
     void EnqueueTruncateIfNeeded(const NActors::TActorContext& ctx);
-    void EnqueueForcedRangeOperationIfNeeded(const NActors::TActorContext& ctx);
+    void EnqueueForcedOperationIfNeeded(const NActors::TActorContext& ctx);
     void LoadNextCompactionMapChunkIfNeeded(const NActors::TActorContext& ctx);
     void ScheduleEnqueueBlobIndexOpIfNeeded(const NActors::TActorContext& ctx);
 
     TVector<ui32> GenerateForceDeleteZeroCompactionRanges() const;
+
+    std::unique_ptr<TEvIndexTablet::TEvForcedOperationResponse>
+    ProcessForcedRangeOperationRequest(
+        const NProtoPrivate::TForcedOperationRequest& request,
+        const NActors::TActorContext& ctx);
+
+    std::unique_ptr<TEvIndexTablet::TEvForcedOperationResponse>
+    ProcessForcedTabletOperationRequest(
+        const NProtoPrivate::TForcedOperationRequest& request,
+        const NActors::TActorContext& ctx);
+
+    void HandleForcedOperationCompletedImpl(
+        const NActors::TActorId& sender,
+        const NProto::TError& error,
+        const NActors::TActorContext& ctx);
 
     void AddInFlightRequest(
         TRequestInfo& requestInfo,
@@ -450,9 +473,31 @@ private:
         }
     }
 
-    void NotifySessionEvent(
+    void RegisterFileSystemEventClient(
+        const NActors::TActorId& recipient,
+        const NActors::TActorId& clientId);
+
+    ui32 SendFileSystemEvents(
         const NActors::TActorContext& ctx,
-        const NProto::TSessionEvent& event);
+        const TVector<NProto::TFileSystemEvent>& events);
+
+    template <typename T>
+    void SendTxFileSystemEvents(
+        const NActors::TActorContext& ctx,
+        const T& args)
+    {
+        //
+        // Must be called after UpdateInMemoryIndexState(args): otherwise a
+        // client, having received an event, may re-read the stale data from
+        // the in-memory index cache.
+        //
+
+        if constexpr (std::is_base_of_v<TIndexStateNodeUpdates, T>) {
+            if (!args.FileSystemEvents.empty()) {
+                SendFileSystemEvents(ctx, args.FileSystemEvents);
+            }
+        }
+    }
 
     TBackpressureThresholds BuildBackpressureThresholds() const;
     TBackpressureThresholds BuildBackpressureSoftThresholds() const;
@@ -492,6 +537,7 @@ private:
 
     void DestroySessionHandlesAndRemoveNodes(
         IIndexTabletDatabase& db,
+        TVector<NProto::TFileSystemEvent>& fileSystemEvents,
         const NActors::TActorContext& ctx,
         TSession* session,
         ui64 commitId,
@@ -520,8 +566,7 @@ private:
         NProto::TProfileLogRequestInfo profileLogRequest,
         ui64 requestId,
         ui64 opLogEntryId,
-        TUnlinkNodeInShardResult result,
-        bool shouldUnlockUponCompletion);
+        TUnlinkNodeInShardResult result);
 
     void RegisterRenameNodeInDestinationActor(
         const NActors::TActorContext& ctx,
@@ -620,6 +665,10 @@ private:
         bool validateHandle);
 
     NProto::TError IsDataOperationAllowed() const;
+    NProto::TError CheckUnconfirmedDataOverlap(
+        ui64 nodeId,
+        const TByteRange& range) const;
+    NProto::TError ForceLoadRangeIfNeeded(ui64 nodeId, const TByteRange& range);
     bool IsInUnconfirmedCreateHandleGracePeriod(
         const NActors::TActorContext& ctx) const;
     bool NeedsNodeDestructionDeferral(
@@ -636,6 +685,7 @@ private:
     // was deferred or failed (in the latter case an orphan node is written).
     bool DeferNodeDestructionOrRemoveNode(
         IIndexTabletDatabase& db,
+        TVector<NProto::TFileSystemEvent>& fileSystemEvents,
         const NActors::TActorContext& ctx,
         const INodeIndexTabletDatabase::TNode& node,
         ui64 commitId,
@@ -947,6 +997,7 @@ private:
     STFUNC(StateAdapterInit);
     STFUNC(StateZombie);
     STFUNC(StateBroken);
+    STFUNC(StateAdapterBroken);
 
     void RegisterFileStore(const NActors::TActorContext& ctx);
     void UnregisterFileStore(const NActors::TActorContext& ctx);

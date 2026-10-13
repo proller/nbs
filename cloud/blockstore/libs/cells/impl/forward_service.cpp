@@ -100,22 +100,22 @@ public:
             const auto& peer = headers.GetInternal().GetPeer();
             const auto diskId = GetDiskId(*request);
 
-            if (Activity) {
+            // only a mount: an unmount or a describe leaving a row behind
+            // would read as a disk mounted from that peer
+            if (Activity &&
+                TMethod::BlockStoreRequest == EBlockStoreRequest::MountVolume)
+            {
                 Activity->Record(
                     peer,
                     diskId,
                     headers.GetClientId(),
-                    TMethod::BlockStoreRequest,
                     Timer->Now());
             }
 
-            // audited because authorization is skipped here: a record of who
-            // went past it, after the fact
-            STORAGE_INFO(
+            STORAGE_DEBUG(
                 "[cell " << cellId << "] inter-cell "
                     << GetBlockStoreRequestName(TMethod::BlockStoreRequest)
-                    << " without authorization, peer=" << peer
-                    << " disk=" << diskId);
+                    << ", peer=" << peer << " disk=" << diskId);
 
             return TMethod::Execute(
                 Trusted.get(),

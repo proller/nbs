@@ -59,6 +59,8 @@ const TIndexTabletActor::TStateInfo TIndexTabletActor::States[STATE_MAX] = {
     { "Adapter",     (IActor::TReceiveFunc)&TIndexTabletActor::StateAdapter},
     { "Zombie",      (IActor::TReceiveFunc)&TIndexTabletActor::StateZombie },
     { "Broken",      (IActor::TReceiveFunc)&TIndexTabletActor::StateBroken },
+    { "AdapterBroken",
+        (IActor::TReceiveFunc)&TIndexTabletActor::StateAdapterBroken },
 };
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -280,6 +282,7 @@ bool TIndexTabletActor::ReadNodesToRemoveForSessionHandles(
 
 void TIndexTabletActor::DestroySessionHandlesAndRemoveNodes(
     IIndexTabletDatabase& db,
+    TVector<NProto::TFileSystemEvent>& fileSystemEvents,
     const TActorContext& ctx,
     TSession* session,
     ui64 commitId,
@@ -319,6 +322,7 @@ void TIndexTabletActor::DestroySessionHandlesAndRemoveNodes(
 
             const bool removed = DeferNodeDestructionOrRemoveNode(
                 db,
+                fileSystemEvents,
                 ctx,
                 *it,
                 commitId,
@@ -661,6 +665,77 @@ NProto::TError TIndexTabletActor::IsDataOperationAllowed() const
     return {};
 }
 
+NProto::TError TIndexTabletActor::CheckUnconfirmedDataOverlap(
+    ui64 nodeId,
+    const TByteRange& range) const
+{
+    if (!UnconfirmedRecoveryReady) {
+        if (HasDataOverlapWithUnconfirmed(nodeId, range)) {
+            return MakeError(
+                E_REJECTED,
+                "write overlaps with unconfirmed recovery data");
+        }
+    }
+
+    return {};
+}
+
+NProto::TError TIndexTabletActor::ForceLoadRangeIfNeeded(
+    ui64 nodeId,
+    const TByteRange& range)
+{
+    if (CompactionStateLoadStatus.Finished) {
+        return {};
+    }
+
+    const ui32 limitInQueue =
+        Config->GetMaxOutOfOrderCompactionMapLoadRequestsInQueue();
+    auto& s = CompactionStateLoadStatus;
+
+    bool reject = false;
+
+    for (ui64 b = range.FirstBlock();
+         b < range.FirstBlock() + range.BlockCount();
+         ++b)
+    {
+        const auto rangeId = GetMixedRangeIndex(nodeId, b);
+
+        if (rangeId > s.MaxLoadedInOrderRangeId &&
+            !s.LoadedOutOfOrderRangeIds.contains(rangeId))
+        {
+            reject = true;
+
+            bool shouldEnqueue = true;
+            ui32 oooRequestsInQueue = 0;
+            for (const auto& req: s.LoadQueue) {
+                if (!req.OutOfOrder) {
+                    continue;
+                }
+
+                if (req.FirstRangeId == rangeId) {
+                    shouldEnqueue = false;
+                    break;
+                }
+
+                if (++oooRequestsInQueue == limitInQueue) {
+                    shouldEnqueue = false;
+                    break;
+                }
+            }
+
+            if (shouldEnqueue) {
+                s.LoadQueue.push_back({rangeId, 1, true});
+            }
+        }
+    }
+
+    if (reject) {
+        return MakeError(E_REJECTED, "compaction state not loaded yet");
+    }
+
+    return {};
+}
+
 bool TIndexTabletActor::IsInUnconfirmedCreateHandleGracePeriod(
     const TActorContext& ctx) const
 {
@@ -711,6 +786,7 @@ bool TIndexTabletActor::ShouldDeferNodeDestruction(
 
 bool TIndexTabletActor::DeferNodeDestructionOrRemoveNode(
     IIndexTabletDatabase& db,
+    TVector<NProto::TFileSystemEvent>& fileSystemEvents,
     const TActorContext& ctx,
     const INodeIndexTabletDatabase::TNode& node,
     ui64 commitId,
@@ -727,7 +803,12 @@ bool TIndexTabletActor::DeferNodeDestructionOrRemoveNode(
         return false;
     }
 
-    auto e = RemoveNode(db, node, node.MinCommitId, commitId);
+    auto e = RemoveNode(
+        db,
+        fileSystemEvents,
+        node,
+        node.MinCommitId,
+        commitId);
     if (HasError(e)) {
         WriteOrphanNode(db, TStringBuilder()
             << operation << ": RemoveNode: " << node.NodeId
@@ -1066,6 +1147,7 @@ void TIndexTabletActor::HandleSessionDisconnected(
         LogTag.c_str(),
         ev->Sender.ToString().c_str());
 
+    FileSystemEventClients.erase(ev->Sender);
     OrphanSession(ev->Sender, ctx.Now());
 }
 
@@ -1088,6 +1170,7 @@ void TIndexTabletActor::HandleSessionDisconnectedInWork(
     // from this client connection. Unconfirmed data keeps this actor id from
     // GenerateBlobIds, so clean it up when the pipe disconnects.
     DeleteUnconfirmedDataForPipeServer(msg.ServerId, ctx);
+    FileSystemEventClients.erase(msg.ServerId);
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -1222,13 +1305,31 @@ void TIndexTabletActor::HandleForcedOperation(
     const auto& request = ev->Get()->Record;
 
     using TResponse = TEvIndexTablet::TEvForcedOperationResponse;
+    std::unique_ptr<TResponse> response;
+    switch (request.GetOpType()) {
+        case NProtoPrivate::TForcedOperationRequest::E_COMPACTION:
+        case NProtoPrivate::TForcedOperationRequest::E_CLEANUP:
+        case NProtoPrivate::TForcedOperationRequest::E_DELETE_EMPTY_RANGES:
+            response = ProcessForcedRangeOperationRequest(request, ctx);
+            break;
+        case NProtoPrivate::TForcedOperationRequest::E_FLUSH:
+        case NProtoPrivate::TForcedOperationRequest::E_FLUSH_BYTES:
+        case NProtoPrivate::TForcedOperationRequest::E_COLLECT_GARBAGE:
+            response = ProcessForcedTabletOperationRequest(request, ctx);
+            break;
+        default:
+            response = std::make_unique<TResponse>(
+                MakeError(E_ARGUMENT, "unsupported mode"));
+    }
+    NCloud::Reply(ctx, *ev, std::move(response));
+}
 
-    auto replyError = [&](NProto::TError error)
-    {
-        auto response = std::make_unique<TResponse>(std::move(error));
-        NCloud::Reply(ctx, *ev, std::move(response));
-    };
-
+std::unique_ptr<TEvIndexTablet::TEvForcedOperationResponse>
+TIndexTabletActor::ProcessForcedRangeOperationRequest(
+    const NProtoPrivate::TForcedOperationRequest& request,
+    const TActorContext& ctx)
+{
+    using TResponse = TEvIndexTablet::TEvForcedOperationResponse;
     using EMode = TEvIndexTabletPrivate::EForcedRangeOperationMode;
     EMode mode{};
     switch (request.GetOpType()) {
@@ -1236,44 +1337,45 @@ void TIndexTabletActor::HandleForcedOperation(
             mode = EMode::Compaction;
             break;
         }
-
         case NProtoPrivate::TForcedOperationRequest::E_CLEANUP: {
             mode = EMode::Cleanup;
             break;
         }
-
         case NProtoPrivate::TForcedOperationRequest::E_DELETE_EMPTY_RANGES: {
             mode = EMode::DeleteZeroCompactionRanges;
             break;
         }
-
         default: {
-            replyError(MakeError(E_ARGUMENT, "unsupported mode"));
-            return;
+            return std::make_unique<TResponse>(
+                MakeError(E_ARGUMENT, "unsupported mode"));
         }
     }
 
-    if (IsForcedRangeOperationRunning()) {
-        const auto currentMode = GetForcedRangeOperationState()->Mode;
+    if (IsForcedOperationRunning()) {
         NProto::TError error;
-        if (currentMode == mode) {
-            error = MakeError(S_ALREADY, "already launched");
+        const auto* rangeState =
+            std::get_if<TForcedRangeOperationState>(GetForcedOperationState());
+        const auto& operationId = std::visit(
+            [](const auto& state) { return state.OperationId; },
+            *GetForcedOperationState());
+        if (rangeState && rangeState->Mode == mode) {
+            error = MakeError(
+                S_ALREADY,
+                "already launched, operationId=" + operationId);
         } else {
-            error = MakeError(E_TRY_AGAIN, TStringBuilder() << "mode mismatch: "
-                << static_cast<int>(mode)
-                << " != " << static_cast<int>(currentMode));
+            error = MakeError(
+                E_TRY_AGAIN,
+                "another operation is running, operationId=" + operationId);
         }
-        replyError(std::move(error));
-        return;
+        return std::make_unique<TResponse>(std::move(error));
     }
 
     TVector<ui32> ranges;
     if (mode == EMode::DeleteZeroCompactionRanges) {
         ranges = GenerateForceDeleteZeroCompactionRanges();
     } else {
-        ranges = request.GetProcessAllRanges()
-            ? GetAllCompactionRanges()
-            : GetNonEmptyCompactionRanges();
+        ranges = request.GetProcessAllRanges() ? GetAllCompactionRanges()
+                                               : GetNonEmptyCompactionRanges();
     }
     const auto* b =
         LowerBound(ranges.begin(), ranges.end(), request.GetMinRangeId());
@@ -1285,9 +1387,140 @@ void TIndexTabletActor::HandleForcedOperation(
     response->Record.SetRangeCount(ranges.size());
     auto operationId = EnqueueForcedRangeOperation(mode, std::move(ranges), {});
     response->Record.SetOperationId(std::move(operationId));
-    EnqueueForcedRangeOperationIfNeeded(ctx);
+    EnqueueForcedOperationIfNeeded(ctx);
+    return response;
+}
 
-    NCloud::Reply(ctx, *ev, std::move(response));
+std::unique_ptr<TEvIndexTablet::TEvForcedOperationResponse>
+TIndexTabletActor::ProcessForcedTabletOperationRequest(
+    const NProtoPrivate::TForcedOperationRequest& request,
+    const TActorContext& ctx)
+{
+    using TResponse = TEvIndexTablet::TEvForcedOperationResponse;
+
+    using EMode = TEvIndexTabletPrivate::EForcedTabletOperationMode;
+    EMode mode{};
+    switch (request.GetOpType()) {
+        case NProtoPrivate::TForcedOperationRequest::E_FLUSH: {
+            mode = EMode::Flush;
+            break;
+        }
+        case NProtoPrivate::TForcedOperationRequest::E_FLUSH_BYTES: {
+            mode = EMode::FlushBytes;
+            break;
+        }
+        case NProtoPrivate::TForcedOperationRequest::E_COLLECT_GARBAGE: {
+            mode = EMode::CollectGarbage;
+            break;
+        }
+        default: {
+            return std::make_unique<TResponse>(
+                MakeError(E_ARGUMENT, "unsupported mode"));
+        }
+    }
+
+    if (IsForcedOperationRunning()) {
+        NProto::TError error;
+        const auto* state =
+            std::get_if<TForcedTabletOperationState>(GetForcedOperationState());
+        const auto& operationId = std::visit(
+            [](const auto& state) { return state.OperationId; },
+            *GetForcedOperationState());
+        if (state && state->Mode == mode) {
+            error = MakeError(
+                S_ALREADY,
+                "already launched, operationId=" + operationId);
+        } else {
+            error = MakeError(
+                E_TRY_AGAIN,
+                "another operation is running, operationId=" + operationId);
+        }
+        return std::make_unique<TResponse>(std::move(error));
+    }
+
+    auto response = std::make_unique<TResponse>();
+    auto operationId = EnqueueForcedTabletOperation(mode, {});
+    response->Record.SetOperationId(std::move(operationId));
+    EnqueueForcedOperationIfNeeded(ctx);
+    return response;
+}
+
+void TIndexTabletActor::EnqueueForcedOperationIfNeeded(const TActorContext& ctx)
+{
+    if (IsForcedOperationRunning()) {
+        return;
+    }
+
+    auto pendingRequest = DequeueForcedOperation();
+    if (!pendingRequest) {
+        return;
+    }
+
+    std::visit(
+        TOverloaded{
+            [&](TPendingForcedRangeOperation& state)
+            {
+                auto request = std::make_unique<
+                    TEvIndexTabletPrivate::TEvForcedRangeOperationRequest>(
+                    std::move(state.Ranges),
+                    state.Mode,
+                    std::move(state.OperationId));
+                ctx.Send(ctx.SelfID, request.release());
+            },
+            [&](TPendingForcedTabletOperation& state)
+            {
+                auto request = std::make_unique<
+                    TEvIndexTabletPrivate::TEvForcedTabletOperationRequest>(
+                    state.Mode,
+                    std::move(state.OperationId));
+                ctx.Send(ctx.SelfID, request.release());
+            }},
+        *pendingRequest);
+}
+
+
+void TIndexTabletActor::HandleForcedOperationCompletedImpl(
+    const TActorId& sender,
+    const NProto::TError& error,
+    const TActorContext& ctx)
+{
+    if (!IsForcedOperationRunning()) {
+        ReportForcedOperationUnexpectedState(
+            "got ForcedOperationCompleted but no current op");
+
+        // This should not happen, but lets be defensive.
+        WorkerActors.erase(sender);
+        EnqueueForcedOperationIfNeeded(ctx);
+        return;
+    }
+
+    std::visit(
+        TOverloaded{
+            [&](const TForcedRangeOperationState& state)
+            {
+                LOG_DEBUG(
+                    ctx,
+                    TFileStoreComponents::TABLET,
+                    "%s ForcedRangeOperation mode=%u completed (%s)",
+                    LogTag.c_str(),
+                    state.Mode,
+                    FormatError(error).c_str());
+            },
+            [&](const TForcedTabletOperationState& state)
+            {
+                LOG_DEBUG(
+                    ctx,
+                    TFileStoreComponents::TABLET,
+                    "%s ForcedTabletOperation mode=%u completed (%s)",
+                    LogTag.c_str(),
+                    state.Mode,
+                    FormatError(error).c_str());
+            }},
+        *GetForcedOperationState());
+
+    WorkerActors.erase(sender);
+    CompleteForcedOperation(error);
+    EnqueueForcedOperationIfNeeded(ctx);
 }
 
 void TIndexTabletActor::HandleForcedOperationStatus(
@@ -1300,13 +1533,26 @@ void TIndexTabletActor::HandleForcedOperationStatus(
     using TStatus = NProtoPrivate::TForcedOperationStatusResponse;
     auto response = std::make_unique<TResponse>();
 
-    const auto* state = FindForcedRangeOperation(request.GetOperationId());
+    const auto* state = FindForcedOperation(request.GetOperationId());
     if (state) {
-        response->Record.SetRangeCount(state->RangesToCompact.size());
-        response->Record.SetProcessedRangeCount(state->Current);
-        response->Record.SetLastProcessedRangeId(state->GetCurrentRange());
-        response->Record.SetStatus(state->Status);
-        response->Record.MutableError()->CopyFrom(state->Error);
+        std::visit(
+            TOverloaded{
+                [&](const TForcedRangeOperationState& state)
+                {
+                    response->Record.SetRangeCount(
+                        state.RangesToCompact.size());
+                    response->Record.SetProcessedRangeCount(state.Current);
+                    response->Record.SetLastProcessedRangeId(
+                        state.GetCurrentRange());
+                    response->Record.SetStatus(state.Status);
+                    response->Record.MutableError()->CopyFrom(state.Error);
+                },
+                [&](const TForcedTabletOperationState& state)
+                {
+                    response->Record.SetStatus(state.Status);
+                    response->Record.MutableError()->CopyFrom(state.Error);
+                }},
+            *state);
     } else if (IsForcedRangeOperationPending(request.GetOperationId())) {
         response->Record.SetStatus(TStatus::E_PENDING);
     } else {
@@ -1797,6 +2043,8 @@ STFUNC(TIndexTabletActor::StateBroken)
         IgnoreFunc(TEvIndexTabletPrivate::TEvReleaseCollectBarrier);
         IgnoreFunc(TEvIndexTabletPrivate::TEvCancelUnconfirmedData);
         IgnoreFunc(TEvIndexTabletPrivate::TEvForcedRangeOperationProgress);
+        IgnoreFunc(TEvIndexTabletPrivate::TEvForcedRangeOperationCompleted);
+        IgnoreFunc(TEvIndexTabletPrivate::TEvForcedTabletOperationCompleted);
         IgnoreFunc(TEvIndexTabletPrivate::TEvLoadNodeRefsRequest);
         IgnoreFunc(TEvIndexTabletPrivate::TEvLoadNodesRequest);
         IgnoreFunc(TEvIndexTabletPrivate::TEvEnqueueBlobIndexOpIfNeeded);
@@ -1849,6 +2097,28 @@ STFUNC(TIndexTabletActor::StateBroken)
                 ev,
                 TFileStoreComponents::TABLET,
                 __PRETTY_FUNCTION__);
+            break;
+    }
+}
+
+////////////////////////////////////////////////////////////////////////////////
+
+STFUNC(TIndexTabletActor::StateAdapterBroken)
+{
+    //
+    // A tablet broken by a failed FastShard init has its state loaded, and
+    // the failure is most likely caused by its shard config (e.g. dead
+    // storage devices). ConfigureAsShard is the only way to repair it - the
+    // rest is the same as in StateBroken.
+    //
+
+    switch (ev->GetTypeRewrite()) {
+        HFunc(
+            TEvIndexTablet::TEvConfigureAsShardRequest,
+            HandleConfigureAsShard);
+
+        default:
+            StateBroken(ev);
             break;
     }
 }

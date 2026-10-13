@@ -409,7 +409,7 @@ NProto::TLinkedDiskFillBandwidth GetBandwidth(
     xxx(FreshByteCountThresholdForBackpressure,         ui32,   40_MB         )\
     xxx(FreshByteCountFeatureMaxValue,                  ui32,   10            )\
     xxx(FreshByteCountHardLimit,                        ui32,   256_MB        )\
-    xxx(FreshLogicalBlocksByteCountHardLimit,           ui64,   512_TB        )\
+    xxx(FreshLogicalBlocksByteCountHardLimit,           ui64,   0             )\
                                                                                \
     xxx(CleanupQueueBytesLimitForBackpressure,            ui64,   4_TB        )\
     xxx(CleanupQueueBytesThresholdForBackpressure,        ui64,   1_TB        )\
@@ -743,9 +743,15 @@ NProto::TLinkedDiskFillBandwidth GetBandwidth(
     xxx(MixedBytesCountCompactionThresholdHDD,      ui32,       0             )\
     xxx(MixedBytesCountCompactionThresholdSSD,      ui32,       0             )\
     xxx(MixedBlocksCountCompactionRangeCountPerRun, ui32,       1             )\
-    xxx(SSDMaxMixedBytesPerUnit,                    ui64,       0             )\
-    xxx(HDDMaxMixedBytesPerUnit,                    ui64,       0             )\
+    xxx(MixedBlocksCompactionThresholdPercentageSSD,                           \
+        ui64,                                                                  \
+        0                                                                     )\
+    xxx(MixedBlocksCompactionThresholdPercentageHDD,                           \
+        ui64,                                                                  \
+        0                                                                     )\
     xxx(CompactionStatsTrackerEnabled,              bool,       false         )\
+    xxx(MixedBlocksCompactionMinStoredBytesHDD,     ui64,       1_GB          )\
+    xxx(MixedBlocksCompactionMinStoredBytesSSD,     ui64,       1_GB          )\
 
 // BLOCKSTORE_STORAGE_CONFIG_RW
 // clang-format on
@@ -1211,12 +1217,6 @@ struct TStorageConfig::TImpl
         FeaturesConfig = std::move(featuresConfig);
     }
 
-    void SetVolumePreemptionType(
-        NProto::EVolumePreemptionType volumePreemptionType)
-    {
-        StorageServiceConfig.SetVolumePreemptionType(volumePreemptionType);
-    }
-
     NProto::TStorageServiceConfig GetEffectiveStorageConfigProto() const
     {
         NProto::TStorageServiceConfig proto = StorageServiceConfig;
@@ -1292,12 +1292,6 @@ void TStorageConfig::SetFeaturesConfig(
     NFeatures::TFeaturesConfigConstPtr featuresConfig)
 {
     Impl->SetFeaturesConfig(std::move(featuresConfig));
-}
-
-void TStorageConfig::SetVolumePreemptionType(
-    NProto::EVolumePreemptionType volumePreemptionType)
-{
-    Impl->SetVolumePreemptionType(volumePreemptionType);
 }
 
 void TStorageConfig::Register(TControlBoard& controlBoard) const

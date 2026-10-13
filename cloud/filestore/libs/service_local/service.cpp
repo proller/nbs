@@ -13,6 +13,7 @@
 #include <cloud/storage/core/libs/common/timer.h>
 #include <cloud/storage/core/libs/diagnostics/logging.h>
 
+#include <library/cpp/monlib/dynamic_counters/counters.h>
 #include <library/cpp/protobuf/util/pb_io.h>
 
 #include <util/folder/path.h>
@@ -154,6 +155,7 @@ private:
     const ILoggingServicePtr Logging;
     const IFileIOServicePtr FileIOService;
     const ITaskQueuePtr TaskQueue;
+    const TLocalFileSystemCountersPtr FileSystemCounters;
     const IProfileLogPtr ProfileLog;
     const TFsPath RootPath;
     const TFsPath StatePath;
@@ -171,6 +173,7 @@ public:
             ITimerPtr timer,
             ISchedulerPtr scheduler,
             ILoggingServicePtr logging,
+            NMonitoring::TDynamicCountersPtr counters,
             IFileIOServicePtr fileIOService,
             ITaskQueuePtr taskQueue,
             IProfileLogPtr profileLog)
@@ -180,12 +183,17 @@ public:
         , Logging(std::move(logging))
         , FileIOService(std::move(fileIOService))
         , TaskQueue(std::move(taskQueue))
+        , FileSystemCounters(
+              std::make_shared<TLocalFileSystemCounters>(*counters))
         , ProfileLog(std::move(profileLog))
         , RootPath(Config->GetRootPath())
         , StatePath(Config->GetStatePath())
     {
         RootPath.CheckExists();
         Log = Logging->CreateLog("NFS_SERVICE");
+
+        FileSystemCounters->MaxHandlePerSessionCount->Set(
+            Config->GetMaxHandlePerSessionCount());
     }
 
     void Start() override;
@@ -228,14 +236,6 @@ FILESTORE_SERVICE_LOCAL_SYNC(FILESTORE_IMPLEMENT_METHOD_SYNC)
 FILESTORE_SERVICE_LOCAL_ASYNC(FILESTORE_IMPLEMENT_METHOD_ASYNC)
 
 #undef FILESTORE_IMPLEMENT_METHOD
-
-    void GetSessionEventsStream(
-        TCallContextPtr callContext,
-        std::shared_ptr<NProto::TGetSessionEventsRequest> request,
-        IResponseHandlerPtr<NProto::TGetSessionEventsResponse> responseHandler) override
-    {
-        Y_UNUSED(callContext, request, responseHandler);
-    }
 
 private:
     struct TFileStorePaths
@@ -461,28 +461,6 @@ private:
     }
 
     template <>
-    NProto::TSubscribeSessionResponse Execute<TSubscribeSessionMethod>(
-        NProto::TSubscribeSessionRequest& request,
-        NProto::TProfileLogRequestInfo& logRequest)
-    {
-        Y_UNUSED(request, logRequest);
-        return TErrorResponse(
-            E_NOT_IMPLEMENTED,
-            "SubscribeSession is not implemented for the local service");
-    }
-
-    template <>
-    NProto::TGetSessionEventsResponse Execute<TGetSessionEventsMethod>(
-        NProto::TGetSessionEventsRequest& request,
-        NProto::TProfileLogRequestInfo& logRequest)
-    {
-        Y_UNUSED(request, logRequest);
-        return TErrorResponse(
-            E_NOT_IMPLEMENTED,
-            "GetSessionEvents is not implemented for the local service");
-    }
-
-    template <>
     NProto::TExecuteActionResponse Execute<TExecuteActionMethod>(
         NProto::TExecuteActionRequest& request,
         NProto::TProfileLogRequestInfo& logRequest)
@@ -669,7 +647,8 @@ TLocalFileSystemPtr TLocalFileStore::InitFileSystem(
         Timer,
         Scheduler,
         Logging,
-        FileIOService);
+        FileIOService,
+        FileSystemCounters);
 
     auto [it, inserted] = FileSystems.emplace(id, fs);
     Y_DEBUG_ABORT_UNLESS(inserted);
@@ -780,6 +759,7 @@ IFileStoreServicePtr CreateLocalFileStore(
     ITimerPtr timer,
     ISchedulerPtr scheduler,
     ILoggingServicePtr logging,
+    NMonitoring::TDynamicCountersPtr counters,
     IFileIOServicePtr fileIOService,
     ITaskQueuePtr taskQueue,
     IProfileLogPtr profileLog)
@@ -793,6 +773,7 @@ IFileStoreServicePtr CreateLocalFileStore(
         std::move(timer),
         std::move(scheduler),
         std::move(logging),
+        std::move(counters),
         std::move(fileIOService),
         std::move(taskQueue),
         std::move(profileLog));

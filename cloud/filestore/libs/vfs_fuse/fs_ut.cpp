@@ -17,6 +17,7 @@
 #include <cloud/filestore/libs/service/context.h>
 #include <cloud/filestore/libs/service/filestore.h>
 #include <cloud/filestore/libs/service/filestore_test.h>
+#include <cloud/filestore/libs/service/filesystem_event.h>
 #include <cloud/filestore/libs/service/request.h>
 #include <cloud/filestore/libs/vfs/config.h>
 #include <cloud/filestore/libs/vfs/loop.h>
@@ -49,6 +50,7 @@
 #include <util/generic/ylimits.h>
 #include <util/random/random.h>
 #include <util/system/file.h>
+#include <util/system/mutex.h>
 
 #include <array>
 #include <atomic>
@@ -194,7 +196,9 @@ struct TBootstrap
             ui64 directoryHandlesMaxDataAreaStepSize = 0,
             IFileMapMemoryLimiterPtr fileMapMemoryLimiter =
                 CreateFileMapMemoryLimiterStub(),
-            IPersistentStateManagerPtr persistentStateManager = nullptr)
+            IPersistentStateManagerPtr persistentStateManager = nullptr,
+            IMultiFileSystemEventHandlerPtr multiFileSystemEventHandler =
+                nullptr)
         : Logging(CreateLoggingService("console", { TLOG_RESOURCES }))
         , Scheduler{std::move(scheduler)}
         , Timer{std::move(timer)}
@@ -312,7 +316,8 @@ struct TBootstrap
             CreateProfileLogStub(),
             Session,
             std::move(fileMapMemoryLimiter),
-            std::move(persistentStateManager));
+            std::move(persistentStateManager),
+            std::move(multiFileSystemEventHandler));
     }
 
     NMonitoring::TDynamicCountersPtr GetFileSystemStatsCounters() const
@@ -525,8 +530,115 @@ void DoShouldInvalidateXAttrCacheAfterSuccessfulCreate(
 
 ////////////////////////////////////////////////////////////////////////////////
 
+struct TTestMultiFileSystemEventHandler final
+    : public IMultiFileSystemEventHandler
+{
+    TMutex Lock;
+    TVector<TString> Registered;
+    TVector<TString> Unregistered;
+
+    void OnEvent(const NProto::TFileSystemEvent& event) override
+    {
+        Y_UNUSED(event);
+    }
+
+    void OnDisconnect(ui64 tabletId) override
+    {
+        Y_UNUSED(tabletId);
+    }
+
+    void Register(
+        const TString& fileSystemId,
+        IFileSystemEventHandlerPtr handler) override
+    {
+        Y_UNUSED(handler);
+        with_lock (Lock) {
+            Registered.push_back(fileSystemId);
+        }
+    }
+
+    void Unregister(
+        const TString& fileSystemId,
+        const IFileSystemEventHandlerPtr& handler) override
+    {
+        Y_UNUSED(handler);
+        with_lock (Lock) {
+            Unregistered.push_back(fileSystemId);
+        }
+    }
+
+    TVector<TString> GetRegistered()
+    {
+        with_lock (Lock) {
+            return Registered;
+        }
+    }
+
+    TVector<TString> GetUnregistered()
+    {
+        with_lock (Lock) {
+            return Unregistered;
+        }
+    }
+};
+
+////////////////////////////////////////////////////////////////////////////////
+
 Y_UNIT_TEST_SUITE(TFileSystemTest)
 {
+    Y_UNIT_TEST(ShouldRegisterFileSystemEventHandlerUnderResolvedFileSystemId)
+    {
+        //
+        // The loop is configured with an alias (FileSystemId). The storage
+        // service resolves it upon session creation and returns the actual
+        // id, which the tablets use in FileSystemEvents.
+        //
+
+        const TString resolvedFileSystemId = "resolved_fs";
+        auto multiHandler =
+            std::make_shared<TTestMultiFileSystemEventHandler>();
+
+        {
+            TBootstrap bootstrap(
+                CreateWallClockTimer(),
+                CreateScheduler(),
+                {} /* featuresConfig */,
+                1000 /* handleOpsQueueSize */,
+                1000 /* writeBackCacheAutomaticFlushPeriodMs */,
+                WriteBackCacheCapacity,
+                0 /* directoryHandlesInitialDataSize */,
+                0 /* directoryHandlesMaxDataAreaStepSize */,
+                CreateFileMapMemoryLimiterStub(),
+                nullptr /* persistentStateManager */,
+                multiHandler);
+
+            bootstrap.Service->CreateSessionHandler = [&] (auto, auto) {
+                NProto::TCreateSessionResponse result;
+                result.MutableSession()->SetSessionId(SessionId);
+                result.MutableFileStore()->SetBlockSize(4096);
+                result.MutableFileStore()->SetFileSystemId(
+                    resolvedFileSystemId);
+                return MakeFuture(result);
+            };
+
+            UNIT_ASSERT_VALUES_UNEQUAL(FileSystemId, resolvedFileSystemId);
+            UNIT_ASSERT(!HasError(bootstrap.Start()));
+
+            const auto registered = multiHandler->GetRegistered();
+            UNIT_ASSERT_VALUES_EQUAL(1, registered.size());
+            UNIT_ASSERT_VALUES_EQUAL(resolvedFileSystemId, registered[0]);
+            UNIT_ASSERT_VALUES_EQUAL(0, multiHandler->GetUnregistered().size());
+        }
+
+        //
+        // The loop is destroyed together with the bootstrap.
+        //
+
+        const auto unregistered = multiHandler->GetUnregistered();
+        UNIT_ASSERT_VALUES_EQUAL(1, unregistered.size());
+        UNIT_ASSERT_VALUES_EQUAL(resolvedFileSystemId, unregistered[0]);
+    }
+
     Y_UNIT_TEST(ShouldHandleInitRequest)
     {
         TBootstrap bootstrap;
@@ -7871,6 +7983,22 @@ Y_UNIT_TEST_SUITE(TFileSystemTest)
         UNIT_ASSERT(stopFuture.Wait(WaitTimeout));
     }
 
+    Y_UNIT_TEST(WriteBackCacheShouldNotReportMetricsWhenNotInitialized)
+    {
+        TBootstrap bootstrap;
+
+        bootstrap.Start();
+        Y_DEFER {
+            bootstrap.Stop();
+        };
+
+        bootstrap.ModuleStatsRegistry->UpdateStats(true);
+
+        UNIT_ASSERT(!bootstrap.GetFileSystemStatsCounters()->FindSubgroup(
+            "module",
+            "WriteBackCache"));
+    }
+
     Y_UNIT_TEST(WriteBackCacheShouldReportMetrics)
     {
         NProto::TFileStoreFeatures features;
@@ -8274,6 +8402,8 @@ Y_UNIT_TEST_SUITE(TFileSystemTest)
         TFuture<ui32> writeFuture;
 
         for (ui32 i = 1; i <= maxRequestCount; i++) {
+            bool isBackpressured = backpressureCount->Val() == 1;
+
             // Requests should not overlap nor touch in order to be put into
             // separate flush batches
             writeFuture = bootstrap.Fuse->SendRequest<TWriteRequest>(
@@ -8282,26 +8412,25 @@ Y_UNIT_TEST_SUITE(TFileSystemTest)
                 i * 100,
                 "abc");
 
-            // Request should be put in either unflushed or pending queue
-            UNIT_ASSERT(WaitForCondition(
-                WaitTimeout,
-                [&]()
-                {
-                    bootstrap.ModuleStatsRegistry->UpdateStats(true);
-                    return unflushedQueueCount->Val() == i ||
-                           pendingQueueCount->Val() == 1;
-                }));
-
-            if (pendingQueueCount->Val() == 1) {
-                // This happens when backpressure is applied
+            if (isBackpressured) {
                 break;
-            } else {
-                UNIT_ASSERT(writeFuture.Wait(WaitTimeout));
             }
+
+            // Backpressure status is updated before the request is responded
+            UNIT_ASSERT(writeFuture.Wait(WaitTimeout));
+            bootstrap.ModuleStatsRegistry->UpdateStats(true);
         }
 
-        UNIT_ASSERT_VALUES_EQUAL(1, pendingQueueCount->Val());
         UNIT_ASSERT_VALUES_EQUAL(1, backpressureCount->Val());
+
+        UNIT_ASSERT(WaitForCondition(
+            WaitTimeout,
+            [&]()
+            {
+                bootstrap.ModuleStatsRegistry->UpdateStats(true);
+                return pendingQueueCount->Val() == 1;
+            }));
+
         UNIT_ASSERT(!writeFuture.HasValue());
 
         firstWriteDataPromise.SetValue({});

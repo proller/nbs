@@ -18,7 +18,7 @@ NProto::TError ValidateRequest(
     ui32 blockSize,
     ui32 maxFileBlocks)
 {
-    if (request.GetNodeId() == InvalidNodeId || request.GetFlags() == 0) {
+    if (request.GetNodeId() == InvalidNodeId) {
         return ErrorInvalidArgument();
     }
 
@@ -240,11 +240,21 @@ void TIndexTabletActor::ExecuteTx_SetNodeAttr(
 
     UpdateNode(
         *db,
+        args.FileSystemEvents,
         args.NodeId,
         args.Node->MinCommitId,
         args.CommitId,
         attrs,
         args.Node->Attrs);
+
+    //
+    // UpdateNode skips InvalidateNode for time-only changes. An explicit
+    // time change (e.g. utimes) still has to invalidate the cached attrs.
+    //
+
+    if (!HasNonTimeAttrChanges(attrs, args.Node->Attrs)) {
+        AddInvalidateNodeEvent(args.FileSystemEvents, args.NodeId);
+    }
 
     args.Node->Attrs = std::move(attrs);
 
@@ -265,14 +275,6 @@ void TIndexTabletActor::CompleteTx_SetNodeAttr(
 
         auto* node = response->Record.MutableNode();
         ConvertNodeFromAttrs(*node, args.NodeId, args.Node->Attrs);
-
-        NProto::TSessionEvent sessionEvent;
-        {
-            auto* changed = sessionEvent.AddNodeChanged();
-            changed->SetNodeId(args.NodeId);
-            changed->SetKind(NProto::TSessionEvent::NODE_ATTR_CHANGED);
-        }
-        NotifySessionEvent(ctx, sessionEvent);
     }
 
     CompleteResponse<TEvService::TSetNodeAttrMethod>(

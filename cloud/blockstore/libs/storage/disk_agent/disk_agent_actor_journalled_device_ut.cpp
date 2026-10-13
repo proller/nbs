@@ -14,6 +14,7 @@
 
 #include <util/folder/tempdir.h>
 #include <util/random/random.h>
+#include <util/stream/file.h>
 #include <util/system/hostname.h>
 
 #include <chrono>
@@ -278,6 +279,90 @@ Y_UNIT_TEST_SUITE(TDiskAgentJournalledDeviceTest)
         }
     }
 
+    Y_UNIT_TEST_F(ShouldRejectUnknownAccessMode, TFixture)
+    {
+        const TString clientId = "client-id";
+        const ui64 requestId = 42;
+
+        auto env =
+            TTestEnvBuilder(*Runtime).With(CreateDiskAgentConfig()).Build();
+
+        TDiskAgentClient diskAgent(*Runtime);
+        diskAgent.WaitReady();
+
+        TTestClient client{Port};
+
+        {
+            NCloud::NProto::TDeviceProtocolRequest request;
+            request.SetRequestId(requestId);
+            auto& proto = *request.MutableAcquireDevices();
+            proto.MutableHeaders()->SetClientId(clientId);
+            *proto.MutableDeviceUUIDs()->Add() = FileDevices[0].GetDeviceId();
+            proto.SetAccessMode(static_cast<NCloud::NProto::EAccessMode>(42));
+            client.Send(request);
+        }
+
+        Runtime->DispatchEvents(TDispatchOptions(), 10ms);
+
+        {
+            auto response = client.Receive();
+            UNIT_ASSERT_VALUES_EQUAL(requestId, response.GetRequestId());
+            UNIT_ASSERT_EQUAL(
+                NProto::TDeviceProtocolResponse::ResponseCase::kAcquireDevices,
+                response.GetResponseCase());
+
+            const auto& error = response.GetAcquireDevices().GetError();
+
+            UNIT_ASSERT_VALUES_EQUAL(E_ARGUMENT, error.GetCode());
+        }
+    }
+
+    Y_UNIT_TEST_F(ShouldRejectOutdatedFastshardGeneration, TFixture)
+    {
+        const TString fastshardId = "fastshard-id";
+        const ui64 requestId = 42;
+
+        auto env =
+            TTestEnvBuilder(*Runtime).With(CreateDiskAgentConfig()).Build();
+
+        TDiskAgentClient diskAgent(*Runtime);
+        diskAgent.WaitReady();
+
+        TTestClient client{Port};
+
+        auto acquire = [&](const TString& clientId, ui32 generation)
+        {
+            NCloud::NProto::TDeviceProtocolRequest request;
+            request.SetRequestId(requestId);
+            auto& proto = *request.MutableAcquireDevices();
+            proto.MutableHeaders()->SetClientId(clientId);
+            *proto.MutableDeviceUUIDs()->Add() = FileDevices[0].GetDeviceId();
+            proto.SetAccessMode(NCloud::NProto::ACCESS_READ_ONLY);
+            proto.SetFastshardId(fastshardId);
+            proto.SetGeneration(generation);
+            client.Send(request);
+
+            Runtime->DispatchEvents(TDispatchOptions(), 10ms);
+
+            auto response = client.Receive();
+            UNIT_ASSERT_VALUES_EQUAL(requestId, response.GetRequestId());
+            UNIT_ASSERT_EQUAL(
+                NProto::TDeviceProtocolResponse::ResponseCase::kAcquireDevices,
+                response.GetResponseCase());
+            return response.GetAcquireDevices().GetError();
+        };
+
+        UNIT_ASSERT_VALUES_EQUAL(S_OK, acquire("client-1", 5).GetCode());
+
+        // The generation is tracked per fastshard, so a second client of the
+        // same fastshard with an older generation is rejected.
+        UNIT_ASSERT_VALUES_EQUAL(
+            E_BS_INVALID_SESSION,
+            acquire("client-2", 3).GetCode());
+
+        UNIT_ASSERT_VALUES_EQUAL(S_OK, acquire("client-2", 6).GetCode());
+    }
+
     Y_UNIT_TEST_F(ShouldRouteRequestsToDevices, TFixture)
     {
         TString clientId = "client-id";
@@ -455,6 +540,158 @@ Y_UNIT_TEST_SUITE(TDiskAgentJournalledDeviceTest)
                 E_BS_INVALID_SESSION,
                 error.GetCode(),
                 FormatError(error));
+        }
+    }
+
+    Y_UNIT_TEST_F(ShouldFormatWholeDevice, TFixture)
+    {
+        const TString clientId = "client-id";
+        const TString uuid = FileDevices[0].GetDeviceId();
+        const ui64 pageNo = 0x10;
+
+        auto env =
+            TTestEnvBuilder(*Runtime).With(CreateDiskAgentConfig()).Build();
+
+        TDiskAgentClient diskAgent(*Runtime);
+        diskAgent.WaitReady();
+
+        TTestClient client{Port};
+
+        ui64 requestId = 0;
+
+        const auto exchange =
+            [&](NCloud::NProto::TDeviceProtocolRequest request)
+        {
+            request.SetRequestId(++requestId);
+            client.Send(request);
+
+            Runtime->DispatchEvents(TDispatchOptions(), 10ms);
+
+            auto response = client.Receive();
+            UNIT_ASSERT_VALUES_EQUAL(requestId, response.GetRequestId());
+            return response;
+        };
+
+        const auto formatDevice = [&](bool wholeDevice)
+        {
+            NCloud::NProto::TDeviceProtocolRequest request;
+            auto& proto = *request.MutableFormatDevice();
+            proto.MutableHeaders()->SetClientId(clientId);
+            proto.SetDeviceUUID(uuid);
+            proto.SetWholeDevice(wholeDevice);
+
+            auto response = exchange(std::move(request));
+            UNIT_ASSERT_EQUAL(
+                NProto::TDeviceProtocolResponse::ResponseCase::kFormatDevice,
+                response.GetResponseCase());
+
+            const auto& error = response.GetFormatDevice().GetError();
+            UNIT_ASSERT_VALUES_EQUAL_C(
+                S_OK,
+                error.GetCode(),
+                FormatError(error));
+        };
+
+        const auto readPage = [&]
+        {
+            NCloud::NProto::TDeviceProtocolRequest request;
+            auto& proto = *request.MutableReadPages();
+            proto.MutableHeaders()->SetClientId(clientId);
+            proto.SetDeviceUUID(uuid);
+
+            auto& group = *proto.MutablePageGroupRefs()->Add();
+            group.SetFirstPageNo(pageNo);
+            group.SetPageSize(DefaultBlockSize);
+            group.SetPageCount(1);
+
+            auto response = exchange(std::move(request));
+            UNIT_ASSERT_EQUAL(
+                NProto::TDeviceProtocolResponse::ResponseCase::kReadPages,
+                response.GetResponseCase());
+
+            const auto& pages = response.GetReadPages();
+            const auto& error = pages.GetError();
+            UNIT_ASSERT_VALUES_EQUAL_C(
+                S_OK,
+                error.GetCode(),
+                FormatError(error));
+
+            UNIT_ASSERT_VALUES_EQUAL(1, pages.PageGroupsSize());
+            UNIT_ASSERT_VALUES_EQUAL(1, pages.GetPageGroups(0).ContentSize());
+            return pages.GetPageGroups(0).GetContent(0);
+        };
+
+        // Acquire the device
+
+        {
+            NCloud::NProto::TDeviceProtocolRequest request;
+            auto& proto = *request.MutableAcquireDevices();
+            proto.MutableHeaders()->SetClientId(clientId);
+            *proto.MutableDeviceUUIDs()->Add() = uuid;
+
+            auto response = exchange(std::move(request));
+            UNIT_ASSERT_EQUAL(
+                NProto::TDeviceProtocolResponse::ResponseCase::kAcquireDevices,
+                response.GetResponseCase());
+
+            const auto& error = response.GetAcquireDevices().GetError();
+            UNIT_ASSERT_VALUES_EQUAL_C(
+                S_OK,
+                error.GetCode(),
+                FormatError(error));
+        }
+
+        // Put some data on the device
+
+        {
+            NCloud::NProto::TDeviceProtocolRequest request;
+            auto& proto = *request.MutableWriteLogRecord();
+            proto.MutableHeaders()->SetClientId(clientId);
+            proto.SetDeviceUUID(uuid);
+            proto.SetLogSequenceNumber(1);
+
+            auto& group = *proto.MutablePageGroups()->Add();
+            group.SetFirstPageNo(pageNo);
+            group.MutableContent()->Add()->resize(DefaultBlockSize, 'A');
+
+            auto response = exchange(std::move(request));
+            UNIT_ASSERT_EQUAL(
+                NProto::TDeviceProtocolResponse::ResponseCase::kWriteLogRecord,
+                response.GetResponseCase());
+
+            const auto& error = response.GetWriteLogRecord().GetError();
+            UNIT_ASSERT_VALUES_EQUAL_C(
+                S_OK,
+                error.GetCode(),
+                FormatError(error));
+        }
+
+        UNIT_ASSERT_VALUES_EQUAL(TString(DefaultBlockSize, 'A'), readPage());
+
+        // The device has no journal, so the default format leaves the data
+        // untouched
+
+        formatDevice(false);
+
+        UNIT_ASSERT_VALUES_EQUAL(TString(DefaultBlockSize, 'A'), readPage());
+
+        // Formatting the whole device wipes the data
+
+        formatDevice(true);
+
+        UNIT_ASSERT_VALUES_EQUAL(TString(DefaultBlockSize, 0), readPage());
+
+        // and the backing file is all zeroes
+
+        {
+            const TString content =
+                TFileInput(FileDevices[0].GetPath()).ReadAll();
+            UNIT_ASSERT_VALUES_EQUAL(
+                FileDevices[0].GetFileSize(),
+                content.size());
+            UNIT_ASSERT_VALUES_EQUAL(
+                TString::npos,
+                content.find_first_not_of('\0'));
         }
     }
 }

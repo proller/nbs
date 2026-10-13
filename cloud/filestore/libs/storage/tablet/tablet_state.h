@@ -30,6 +30,7 @@
 #include <cloud/filestore/libs/storage/tablet/model/verify.h>
 #include <cloud/filestore/libs/storage/tablet/protos/tablet.pb.h>
 #include <cloud/filestore/private/api/protos/tablet.pb.h>
+#include <cloud/filestore/public/api/protos/filesystem_event.pb.h>
 
 #include <cloud/storage/core/libs/common/error.h>
 #include <cloud/storage/core/libs/tablet/model/commit.h>
@@ -249,6 +250,9 @@ private:
 
     bool CompressNodeRef = false;
 
+    /*const*/ bool FileSystemEventsEnabled = false;
+    /*const*/ bool FileSystemEventsDryRunModeEnabled = false;
+
     bool StateLoaded = false;
 
 protected:
@@ -346,6 +350,24 @@ public:
 
     void SetCompressNodeRef(IIndexTabletDatabase& db, bool compressNodeRef);
 
+protected:
+    //
+    // FileSystemEvents - appended to the transaction's sink, only if
+    // FileSystemEventsEnabled is set.
+    //
+
+    void AddInvalidateNodeEvent(
+        TVector<NProto::TFileSystemEvent>& fileSystemEvents,
+        ui64 nodeId);
+
+private:
+    void AddInvalidateNodeRefEvent(
+        TVector<NProto::TFileSystemEvent>& fileSystemEvents,
+        ui64 nodeId,
+        const TString& name);
+
+public:
+
     //
     // FileSystem
     //
@@ -419,6 +441,17 @@ public:
         return CompressNodeRef || FileSystem.GetCompressNodeRef();
     }
 
+    /**
+     * Checks whether FileSystemEvents should be counted but not sent to the
+     * clients.
+     *
+     * @return - True if FileSystemEventsDryRunModeEnabled is set.
+     */
+    bool IsFileSystemEventsDryRunModeEnabled() const
+    {
+        return FileSystemEventsDryRunModeEnabled;
+    }
+
     ui64 GetCurrentCommitId() const
     {
         return MakeCommitId(Generation, LastStep);
@@ -431,11 +464,6 @@ public:
         }
 
         return MakeCommitId(Generation, ++LastStep);
-    }
-
-    ui64 GenerateEventId(TSession* session)
-    {
-        return MakeCommitId(Generation, ++session->LastEvent);
     }
 
     const NProto::TFileSystemStats& GetFileSystemStats() const
@@ -556,7 +584,6 @@ public:
     ui64 GetConfigChannelCount() const;
 
     TVector<ui32> GetChannels(EChannelDataKind kind) const;
-    TVector<ui32> GetUnwritableChannels() const;
     TVector<ui32> GetChannelsToMove(ui32 percentageThreshold) const;
     TVector<NCloud::NStorage::TChannelMonInfo> MakeChannelMonInfos() const;
 
@@ -590,6 +617,7 @@ public:
 
     void UpdateNode(
         IIndexTabletDatabase& db,
+        TVector<NProto::TFileSystemEvent>& fileSystemEvents,
         ui64 nodeId,
         ui64 minCommitId,
         ui64 maxCommitId,
@@ -598,6 +626,7 @@ public:
 
     [[nodiscard]] NProto::TError RemoveNode(
         IIndexTabletDatabase& db,
+        TVector<NProto::TFileSystemEvent>& fileSystemEvents,
         const INodeIndexTabletDatabase::TNode& node,
         ui64 minCommitId,
         ui64 maxCommitId);
@@ -611,6 +640,7 @@ public:
     // removed right away.
     [[nodiscard]] NProto::TError UnlinkNode(
         IIndexTabletDatabase& db,
+        TVector<NProto::TFileSystemEvent>& fileSystemEvents,
         ui64 parentNodeId,
         const TString& name,
         const INodeIndexTabletDatabase::TNode& node,
@@ -621,6 +651,7 @@ public:
 
     void UnlinkExternalNode(
         IIndexTabletDatabase& db,
+        TVector<NProto::TFileSystemEvent>& fileSystemEvents,
         ui64 parentNodeId,
         const TString& name,
         const TString& shardId,
@@ -744,6 +775,7 @@ public:
 public:
     void CreateNodeRef(
         IIndexTabletDatabase& db,
+        TVector<NProto::TFileSystemEvent>& fileSystemEvents,
         ui64 nodeId,
         ui64 commitId,
         const TString& childName,
@@ -754,6 +786,7 @@ public:
 
     void RemoveNodeRef(
         IIndexTabletDatabase& db,
+        TVector<NProto::TFileSystemEvent>& fileSystemEvents,
         ui64 nodeId,
         ui64 minCommitId,
         ui64 maxCommitId,
@@ -857,7 +890,6 @@ public:
     void ResetSession(IIndexTabletDatabase& db, TSession* session, const TMaybe<TString>& state);
 
     TVector<TSession*> GetTimedOutSessions(TInstant now) const;
-    TVector<TSession*> GetSessionsToNotify(const NProto::TSessionEvent& event) const;
     TVector<NProtoPrivate::TTabletSessionInfo> DescribeSessions() const;
 
     const TSessionHistoryList& GetSessionHistoryList() const;
@@ -1532,7 +1564,7 @@ public:
     void LoadCompactionMap(const TVector<TCompactionRangeInfo>& compactionMap);
 
     //
-    // Forced Compaction
+    // Forced operations
     //
 
 public:
@@ -1571,17 +1603,49 @@ public:
         }
     };
 
-private:
+    struct TForcedTabletOperationState
+    {
+        const TEvIndexTabletPrivate::EForcedTabletOperationMode Mode;
+        const TString OperationId;
+        TInstant StartTime = TInstant::Now();
+        NProtoPrivate::TForcedOperationStatusResponse::EStatus Status =
+            NProtoPrivate::TForcedOperationStatusResponse::E_UNKNOWN;
+        NProto::TError Error;
+
+        TForcedTabletOperationState(
+                TEvIndexTabletPrivate::EForcedTabletOperationMode mode,
+                TString operationId)
+            : Mode(mode)
+            , OperationId(std::move(operationId))
+        {}
+    };
+
+    using TForcedOperationState =
+        std::variant<TForcedRangeOperationState, TForcedTabletOperationState>;
+
+protected:
     struct TPendingForcedRangeOperation
     {
-        TEvIndexTabletPrivate::EForcedRangeOperationMode Mode;
+        using EMode = TEvIndexTabletPrivate::EForcedRangeOperationMode;
+        EMode Mode = EMode::Compaction;
         TVector<ui32> Ranges;
         TString OperationId;
     };
 
-    TVector<TPendingForcedRangeOperation> PendingForcedRangeOperations;
-    TMaybe<TForcedRangeOperationState> ForcedRangeOperationState;
-    TVector<TForcedRangeOperationState> CompletedForcedRangeOperations;
+    struct TPendingForcedTabletOperation
+    {
+        using EMode = TEvIndexTabletPrivate::EForcedTabletOperationMode;
+        EMode Mode = EMode::Flush;
+        TString OperationId;
+    };
+
+    using TPendingForcedOperation = std::
+        variant<TPendingForcedRangeOperation, TPendingForcedTabletOperation>;
+
+private:
+    TVector<TPendingForcedOperation> PendingForcedOperations;
+    TMaybe<TForcedOperationState> ForcedOperationState;
+    TVector<TForcedOperationState> CompletedForcedOperations;
 
 public:
     // Allocates a new operationId if provided operationId was empty
@@ -1590,11 +1654,17 @@ public:
         TEvIndexTabletPrivate::EForcedRangeOperationMode mode,
         TVector<ui32> ranges,
         TString operationId);
-    TMaybe<TPendingForcedRangeOperation> DequeueForcedRangeOperation();
+    TString EnqueueForcedTabletOperation(
+        TEvIndexTabletPrivate::EForcedTabletOperationMode mode,
+        TString operationId);
+    TMaybe<TPendingForcedOperation> DequeueForcedOperation();
 
-    void StartForcedRangeOperation(
+    TForcedRangeOperationState* StartForcedRangeOperation(
         TEvIndexTabletPrivate::EForcedRangeOperationMode mode,
         TVector<ui32> ranges,
+        TString operationId);
+    TForcedTabletOperationState* StartForcedTabletOperation(
+        TEvIndexTabletPrivate::EForcedTabletOperationMode mode,
         TString operationId);
 
     void AbortForcedRangeOperation(
@@ -1603,25 +1673,21 @@ public:
         TString operationId,
         const NProto::TError& error);
 
-    void CompleteForcedRangeOperation(const NProto::TError& error);
+    void CompleteForcedOperation(const NProto::TError& error);
 
-    const TForcedRangeOperationState* GetForcedRangeOperationState() const
+    const TForcedOperationState* GetForcedOperationState() const
     {
-        return ForcedRangeOperationState.Get();
+        return ForcedOperationState.Get();
     }
 
-    const TForcedRangeOperationState* FindForcedRangeOperation(
+    const TForcedOperationState* FindForcedOperation(
         const TString& operationId) const;
 
-    void UpdateForcedRangeOperationProgress(ui32 current)
-    {
-        ForcedRangeOperationState->Current =
-            Max(ForcedRangeOperationState->Current, current);
-    }
+    void UpdateForcedRangeOperationProgress(ui32 current);
 
-    bool IsForcedRangeOperationRunning() const
+    bool IsForcedOperationRunning() const
     {
-        return ForcedRangeOperationState.Defined();
+        return ForcedOperationState.Defined();
     }
 
     bool IsForcedRangeOperationPending(const TString& operationId) const;

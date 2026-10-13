@@ -126,9 +126,6 @@ public:
 
     void SetFeaturesConfig(NFeatures::TFeaturesConfigConstPtr featuresConfig);
 
-    void SetVolumePreemptionType(
-        NProto::EVolumePreemptionType volumePreemptionType);
-
     void Register(NKikimr::TControlBoard& controlBoard) const;
 
     static TStorageConfigConstPtr Merge(
@@ -999,11 +996,15 @@ public:
 
     [[nodiscard]] ui32 GetMixedBlocksCountCompactionRangeCountPerRun() const;
 
-    [[nodiscard]] ui64 GetSSDMaxMixedBytesPerUnit() const;
+    [[nodiscard]] ui64 GetMixedBlocksCompactionThresholdPercentageSSD() const;
 
-    [[nodiscard]] ui64 GetHDDMaxMixedBytesPerUnit() const;
+    [[nodiscard]] ui64 GetMixedBlocksCompactionThresholdPercentageHDD() const;
 
     [[nodiscard]] bool GetCompactionStatsTrackerEnabled() const;
+
+    [[nodiscard]] ui64 GetMixedBlocksCompactionMinStoredBytesSSD() const;
+
+    [[nodiscard]] ui64 GetMixedBlocksCompactionMinStoredBytesHDD() const;
 };
 
 ui64 GetAllocationUnit(

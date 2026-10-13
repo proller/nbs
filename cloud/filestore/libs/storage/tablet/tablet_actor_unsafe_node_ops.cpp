@@ -166,7 +166,12 @@ void TIndexTabletActor::ExecuteTx_UnsafeDeleteNode(
         return;
     }
 
-    args.Error = RemoveNode(*db, *args.Node, args.Node->MinCommitId, commitId);
+    args.Error = RemoveNode(
+        *db,
+        args.FileSystemEvents,
+        *args.Node,
+        args.Node->MinCommitId,
+        commitId);
 }
 
 void TIndexTabletActor::CompleteTx_UnsafeDeleteNode(
@@ -260,6 +265,7 @@ void TIndexTabletActor::ExecuteTx_UnsafeUpdateNode(
     ConvertAttrsToNode(args.Request.GetNode(), &node);
     UpdateNode(
         *db,
+        args.FileSystemEvents,
         args.Request.GetNode().GetId(),
         nodeCommitId,
         commitId,
@@ -354,6 +360,7 @@ void TIndexTabletActor::CompleteTx_UnsafeGetNode(
     if (args.Node) {
         auto& attrs = *response->Record.MutableNode();
         ConvertNodeFromAttrs(attrs, args.Node->NodeId, args.Node->Attrs);
+        response->Record.SetCommitId(args.Node->MinCommitId);
     } else {
         *response->Record.MutableError() =
             ErrorInvalidTarget(args.Request.GetId());
@@ -440,6 +447,7 @@ void TIndexTabletActor::ExecuteTx_UnsafeCreateNodeRef(
 
     CreateNodeRef(
         *db,
+        args.FileSystemEvents,
         args.Request.GetParentId(),
         commitId,
         args.Request.GetName(),
@@ -540,6 +548,7 @@ void TIndexTabletActor::ExecuteTx_UnsafeDeleteNodeRef(
 
     RemoveNodeRef(
         *db,
+        args.FileSystemEvents,
         args.Request.GetParentId(),
         args.NodeRef->MinCommitId,
         commitId,
@@ -641,6 +650,7 @@ void TIndexTabletActor::ExecuteTx_UnsafeUpdateNodeRef(
 
     RemoveNodeRef(
         *db,
+        args.FileSystemEvents,
         args.Request.GetParentId(),
         args.NodeRef->MinCommitId,
         commitId,
@@ -651,6 +661,7 @@ void TIndexTabletActor::ExecuteTx_UnsafeUpdateNodeRef(
 
     CreateNodeRef(
         *db,
+        args.FileSystemEvents,
         args.Request.GetParentId(),
         commitId,
         args.Request.GetName(),
@@ -842,7 +853,7 @@ void TIndexTabletActor::CompleteTx_UnsafeCreateHandle(
 
     auto response =
         std::make_unique<TEvIndexTablet::TEvUnsafeCreateHandleResponse>(
-            args.Error);
+            std::move(args.Error));
 
     LOG_INFO(
         ctx,

@@ -71,12 +71,26 @@ ui64 TIndexTabletState::CreateNode(
 
 void TIndexTabletState::UpdateNode(
     IIndexTabletDatabase& db,
+    TVector<NProto::TFileSystemEvent>& fileSystemEvents,
     ui64 nodeId,
     ui64 minCommitId,
     ui64 maxCommitId,
     const NProto::TNode& attrs,
     const NProto::TNode& prevAttrs)
 {
+    //
+    // Time-only changes don't produce InvalidateNode. Otherwise every write
+    // (which always updates MTime) would produce an event. A write produces
+    // InvalidateNode only if it changes the file size. The same applies to
+    // the parent directory MTime/CTime updates upon CreateNode/UnlinkNode -
+    // those changes are covered by InvalidateNodeRef. Explicit time changes
+    // via SetNodeAttr produce InvalidateNode in SetNodeAttr itself.
+    //
+
+    if (HasNonTimeAttrChanges(attrs, prevAttrs)) {
+        AddInvalidateNodeEvent(fileSystemEvents, nodeId);
+    }
+
     UpdateUsedBlocksCount(db, attrs.GetSize(), prevAttrs.GetSize());
 
     const ui32 prevQuotaId = prevAttrs.GetQuotaId();
@@ -103,8 +117,15 @@ void TIndexTabletState::UpdateNode(
 
     ui64 checkpointId = Impl->Checkpoints.FindCheckpoint(nodeId, minCommitId);
     if (checkpointId == InvalidCommitId) {
-        // simple in-place update
-        db.WriteNode(nodeId, minCommitId, attrs);
+        // in-place update. The new version starts at maxCommitId, so that the
+        // node's CommitId points to its last modification.
+        // TODO(#5953): get rid of the special case for the root node. Older
+        // versions read it at CommitId 0 upon tablet start, so it should stay
+        // there until newer versions no longer need it
+        db.WriteNode(
+            nodeId,
+            nodeId == RootNodeId ? minCommitId : maxCommitId,
+            attrs);
     } else {
         // copy-on-write update
         db.WriteNode(nodeId, maxCommitId, attrs);
@@ -116,6 +137,7 @@ void TIndexTabletState::UpdateNode(
 
 NProto::TError TIndexTabletState::RemoveNode(
     IIndexTabletDatabase& db,
+    TVector<NProto::TFileSystemEvent>& fileSystemEvents,
     const INodeIndexTabletDatabase::TNode& node,
     ui64 minCommitId,
     ui64 maxCommitId)
@@ -137,6 +159,8 @@ NProto::TError TIndexTabletState::RemoveNode(
 
     db.DeleteNode(node.NodeId);
     DecrementUsedNodesCount(db);
+
+    AddInvalidateNodeEvent(fileSystemEvents, node.NodeId);
 
     UpdateUsedBlocksCount(db, 0, node.Attrs.GetSize());
 
@@ -164,6 +188,7 @@ bool TIndexTabletState::UnlinkDestroysNode(
 
 NProto::TError TIndexTabletState::UnlinkNode(
     IIndexTabletDatabase& db,
+    TVector<NProto::TFileSystemEvent>& fileSystemEvents,
     ui64 parentNodeId,
     const TString& name,
     const INodeIndexTabletDatabase::TNode& node,
@@ -178,6 +203,7 @@ NProto::TError TIndexTabletState::UnlinkNode(
         auto attrs = CopyAttrs(node.Attrs, E_CM_CMTIME | E_CM_UNREF);
         UpdateNode(
             db,
+            fileSystemEvents,
             node.NodeId,
             minCommitId,
             maxCommitId,
@@ -190,6 +216,7 @@ NProto::TError TIndexTabletState::UnlinkNode(
     } else {
         auto e = RemoveNode(
             db,
+            fileSystemEvents,
             node,
             minCommitId,
             maxCommitId);
@@ -205,6 +232,7 @@ NProto::TError TIndexTabletState::UnlinkNode(
 
     RemoveNodeRef(
         db,
+        fileSystemEvents,
         parentNodeId,
         minCommitId,
         maxCommitId,
@@ -219,6 +247,7 @@ NProto::TError TIndexTabletState::UnlinkNode(
 
 void TIndexTabletState::UnlinkExternalNode(
     IIndexTabletDatabase& db,
+    TVector<NProto::TFileSystemEvent>& fileSystemEvents,
     ui64 parentNodeId,
     const TString& name,
     const TString& shardId,
@@ -228,6 +257,7 @@ void TIndexTabletState::UnlinkExternalNode(
 {
     RemoveNodeRef(
         db,
+        fileSystemEvents,
         parentNodeId,
         minCommitId,
         maxCommitId,
@@ -551,6 +581,7 @@ inline bool TryToDecodeShardId(
 
 void TIndexTabletState::CreateNodeRef(
     IIndexTabletDatabase& db,
+    TVector<NProto::TFileSystemEvent>& fileSystemEvents,
     ui64 nodeId,
     ui64 commitId,
     const TString& childName,
@@ -574,10 +605,13 @@ void TIndexTabletState::CreateNodeRef(
     }
 
     db.WriteNodeRef(nodeRef, markExhaustive);
+
+    AddInvalidateNodeRefEvent(fileSystemEvents, nodeId, childName);
 }
 
 void TIndexTabletState::RemoveNodeRef(
     IIndexTabletDatabase& db,
+    TVector<NProto::TFileSystemEvent>& fileSystemEvents,
     ui64 nodeId,
     ui64 minCommitId,
     ui64 maxCommitId,
@@ -587,6 +621,8 @@ void TIndexTabletState::RemoveNodeRef(
     const TString& shardNodeName)
 {
     db.DeleteNodeRef(nodeId, childName);
+
+    AddInvalidateNodeRefEvent(fileSystemEvents, nodeId, childName);
 
     ui64 checkpointId = Impl->Checkpoints.FindCheckpoint(nodeId, minCommitId);
     if (checkpointId != InvalidCommitId) {
@@ -788,6 +824,38 @@ void TIndexTabletState::MarkNodeRefsExhaustive(ui64 nodeId)
 TInMemoryIndexStateStats TIndexTabletState::GetInMemoryIndexStateStats() const
 {
     return Impl->InMemoryIndexState->GetStats();
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// FileSystemEvents
+
+void TIndexTabletState::AddInvalidateNodeEvent(
+    TVector<NProto::TFileSystemEvent>& fileSystemEvents,
+    ui64 nodeId)
+{
+    if (!FileSystemEventsEnabled) {
+        return;
+    }
+
+    NProto::TFileSystemEvent event;
+    event.MutableInvalidateNode()->SetNodeId(nodeId);
+    fileSystemEvents.push_back(std::move(event));
+}
+
+void TIndexTabletState::AddInvalidateNodeRefEvent(
+    TVector<NProto::TFileSystemEvent>& fileSystemEvents,
+    ui64 nodeId,
+    const TString& name)
+{
+    if (!FileSystemEventsEnabled) {
+        return;
+    }
+
+    NProto::TFileSystemEvent event;
+    auto* invalidate = event.MutableInvalidateNodeRef();
+    invalidate->SetNodeId(nodeId);
+    invalidate->SetName(name);
+    fileSystemEvents.push_back(std::move(event));
 }
 
 }   // namespace NCloud::NFileStore::NStorage

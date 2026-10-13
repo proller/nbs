@@ -7,7 +7,6 @@
 #include <cloud/blockstore/libs/cells/iface/config.h>
 #include <cloud/blockstore/libs/client/client.h>
 #include <cloud/blockstore/libs/client/config.h>
-#include <cloud/blockstore/libs/client/multiclient_endpoint.h>
 #include <cloud/blockstore/libs/service/context.h>
 #include <cloud/blockstore/libs/service/service.h>
 #include <cloud/blockstore/libs/service/service_method.h>
@@ -42,6 +41,8 @@ struct TTestBlockStore: public TBlockStoreImpl<TTestBlockStore, IBlockStore>
     // what the connection stamped on it
     TString LastRequestCellId;
 
+    NProto::TMountVolumeRequest LastMountRequest;
+
     // when set, a mount is answered only once the test says so
     bool DeferMount = false;
     TPromise<NProto::TMountVolumeResponse> MountPromise =
@@ -72,6 +73,7 @@ struct TTestBlockStore: public TBlockStoreImpl<TTestBlockStore, IBlockStore>
 
         typename TMethod::TResponse response;
         if constexpr (std::is_same_v<TMethod, TBlockStoreMountVolumeMethod>) {
+            LastMountRequest = *request;
             if (DeferMount) {
                 return MountPromise.GetFuture();
             }
@@ -103,8 +105,8 @@ struct TTestEndpointBootstrap: public ICellHostEndpointBootstrap
     // when set, the setup for this fqdn hands back a future nobody has
     // resolved yet, so a test can catch a migration mid-flight
     TString DeferForFqdn;
-    TPromise<NClient::IMultiClientEndpointPtr> DeferredSetupPromise =
-        NewPromise<NClient::IMultiClientEndpointPtr>();
+    TPromise<IBlockStorePtr> DeferredSetupPromise =
+        NewPromise<IBlockStorePtr>();
 
     TGrpcEndpointBootstrapFuture SetupHostGrpcEndpoint(
         const TBootstrap& bootstrap,
@@ -121,9 +123,8 @@ struct TTestEndpointBootstrap: public ICellHostEndpointBootstrap
             return DeferredSetupPromise.GetFuture();
         }
 
-        return MakeFuture<NClient::IMultiClientEndpointPtr>(
-            NClient::CreateMultiClientEndpoint(
-                GrpcClient,
+        return MakeFuture<IBlockStorePtr>(
+            GrpcClient->CreateEndpoint(
                 config.GetFqdn(),
                 9766,
                 false));
@@ -249,6 +250,15 @@ struct TTestGrpcClient: public NClient::IMultiHostClient
         Y_UNUSED(isSecure);
         return {};
     }
+
+    IBlockStorePtr
+    CreateIOEndpoint(const TString& host, ui32 port, bool isSecure) override
+    {
+        Y_UNUSED(host);
+        Y_UNUSED(port);
+        Y_UNUSED(isSecure);
+        return {};
+    }
 };
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -256,6 +266,7 @@ struct TTestGrpcClient: public NClient::IMultiHostClient
 struct TTestObserver: public ICellConnectionObserver
 {
     TVector<TString> Reported;
+    TVector<TString> ServingHosts;
 
     // runs on the thread that completes the mount, which is also the one
     // that acts on the response - a way for a test to get between the two
@@ -267,6 +278,11 @@ struct TTestObserver: public ICellConnectionObserver
         if (OnReported) {
             OnReported(fqdn);
         }
+    }
+
+    void OnServingHostChanged(TString fqdn) noexcept override
+    {
+        ServingHosts.push_back(std::move(fqdn));
     }
 };
 
@@ -728,8 +744,7 @@ Y_UNIT_TEST_SUITE(TCellConnectionTest)
         UNIT_ASSERT_VALUES_EQUAL("host-a", connection->GetHost());
 
         env.EndpointsSetup->DeferredSetupPromise.SetValue(
-            NClient::CreateMultiClientEndpoint(
-                env.GrpcClient,
+            env.GrpcClient->CreateEndpoint(
                 "host-z",
                 9766,
                 false));
@@ -949,8 +964,7 @@ Y_UNIT_TEST_SUITE(TCellConnectionTest)
         env.Pool->SetHostAlive("host-a", false);
 
         env.EndpointsSetup->DeferredSetupPromise.SetValue(
-            NClient::CreateMultiClientEndpoint(
-                env.GrpcClient,
+            env.GrpcClient->CreateEndpoint(
                 "host-b",
                 9766,
                 false));
@@ -1062,8 +1076,7 @@ Y_UNIT_TEST_SUITE(TCellConnectionTest)
         env.Pool->SetHostAlive("host-c", true);
 
         env.EndpointsSetup->DeferredSetupPromise.SetValue(
-            NClient::CreateMultiClientEndpoint(
-                env.GrpcClient,
+            env.GrpcClient->CreateEndpoint(
                 "host-b",
                 9766,
                 false));
@@ -1126,8 +1139,7 @@ Y_UNIT_TEST_SUITE(TCellConnectionTest)
         env.Pool->SetHostAlive("host-c", true);
 
         env.EndpointsSetup->DeferredSetupPromise.SetValue(
-            NClient::CreateMultiClientEndpoint(
-                env.GrpcClient,
+            env.GrpcClient->CreateEndpoint(
                 "host-b",
                 9766,
                 false));
@@ -1167,8 +1179,7 @@ Y_UNIT_TEST_SUITE(TCellConnectionTest)
         env.Pool->SetHostAlive("host-c", true);
 
         env.EndpointsSetup->DeferredSetupPromise.SetValue(
-            NClient::CreateMultiClientEndpoint(
-                env.GrpcClient,
+            env.GrpcClient->CreateEndpoint(
                 "host-b",
                 9766,
                 false));
@@ -1220,8 +1231,7 @@ Y_UNIT_TEST_SUITE(TCellConnectionTest)
         env.EndpointsSetup->RdmaHandler->HandleConnected();
 
         env.EndpointsSetup->DeferredSetupPromise.SetValue(
-            NClient::CreateMultiClientEndpoint(
-                env.GrpcClient,
+            env.GrpcClient->CreateEndpoint(
                 "host-a",
                 9766,
                 false));
@@ -1307,8 +1317,7 @@ Y_UNIT_TEST_SUITE(TCellConnectionTest)
         // way in; the queued target then carries the connection straight
         // on to host-c, before that could be acted on
         env.EndpointsSetup->DeferredSetupPromise.SetValue(
-            NClient::CreateMultiClientEndpoint(
-                env.GrpcClient,
+            env.GrpcClient->CreateEndpoint(
                 "host-b",
                 9766,
                 false));
@@ -1410,8 +1419,7 @@ Y_UNIT_TEST_SUITE(TCellConnectionTest)
             };
 
         env.EndpointsSetup->DeferredSetupPromise.SetValue(
-            NClient::CreateMultiClientEndpoint(
-                env.GrpcClient,
+            env.GrpcClient->CreateEndpoint(
                 "host-b",
                 9766,
                 false));
@@ -1444,8 +1452,7 @@ Y_UNIT_TEST_SUITE(TCellConnectionTest)
         env.Pool->SetHostAlive("host-c", true);
 
         env.EndpointsSetup->DeferredSetupPromise.SetValue(
-            NClient::CreateMultiClientEndpoint(
-                env.GrpcClient,
+            env.GrpcClient->CreateEndpoint(
                 "host-b",
                 9766,
                 false));
@@ -1522,6 +1529,69 @@ Y_UNIT_TEST_SUITE(TCellConnectionTest)
         UNIT_ASSERT_VALUES_EQUAL(
             "cell-1",
             env.GrpcClient->Service->LastRequestCellId);
+    }
+
+    Y_UNIT_TEST(ShouldMountWithoutEncryptionOnTheCellSide)
+    {
+        TTestEnv env(NProto::CELL_DATA_TRANSPORT_GRPC);
+        auto connection = env.Connect("host-a");
+
+        auto request = std::make_shared<NProto::TMountVolumeRequest>();
+        request->MutableEncryptionSpec()->SetMode(NProto::ENCRYPTION_AES_XTS);
+        connection->GetService()->MountVolume(
+            MakeIntrusive<TCallContext>(),
+            request);
+
+        const auto& mount = env.GrpcClient->Service->LastMountRequest;
+        UNIT_ASSERT_VALUES_EQUAL(
+            static_cast<int>(NProto::NO_ENCRYPTION),
+            static_cast<int>(mount.GetEncryptionSpec().GetMode()));
+        UNIT_ASSERT(mount.GetForceDisableEncryption());
+    }
+
+    Y_UNIT_TEST(ShouldReportServingHostOnConnectAndAfterEveryMove)
+    {
+        TTestEnv env(NProto::CELL_DATA_TRANSPORT_GRPC, false, 0, true);
+
+        auto connection = env.Connect("host-a");
+        UNIT_ASSERT_VALUES_EQUAL(
+            TVector<TString>{"host-a"},
+            env.Observer->ServingHosts);
+
+        env.Pool->SetHostAlive("host-a", false);
+        UNIT_ASSERT_VALUES_EQUAL("host-b", connection->GetHost());
+        UNIT_ASSERT_VALUES_EQUAL(
+            (TVector<TString>{"host-a", "host-b"}),
+            env.Observer->ServingHosts);
+    }
+
+    Y_UNIT_TEST(ShouldCountMovesInCellSensors)
+    {
+        TTestEnv env(NProto::CELL_DATA_TRANSPORT_GRPC, false, 0, true);
+        const auto& counters = env.Pool->GetCounters();
+
+        auto connection = env.Connect("host-a");
+        UNIT_ASSERT_VALUES_EQUAL(1, counters.Connections->Val());
+
+        // the only place to go cannot be reached
+        env.EndpointsSetup->ThrowForFqdn = "host-b";
+        env.Pool->SetHostAlive("host-a", false);
+        UNIT_ASSERT_VALUES_EQUAL("host-a", connection->GetHost());
+        UNIT_ASSERT_VALUES_EQUAL(1, counters.MigrationFailures->Val());
+        UNIT_ASSERT_VALUES_EQUAL(0, counters.Migrations->Val());
+
+        env.EndpointsSetup->ThrowForFqdn = "";
+        env.Pool->SetHostAlive("host-a", false);
+        UNIT_ASSERT_VALUES_EQUAL("host-b", connection->GetHost());
+        UNIT_ASSERT_VALUES_EQUAL(1, counters.Migrations->Val());
+        // the channel of the host it left is given back
+        UNIT_ASSERT_VALUES_EQUAL(1, counters.Connections->Val());
+
+        // both hosts are dead now: nowhere to go
+        env.Pool->SetHostAlive("host-b", false);
+        UNIT_ASSERT_VALUES_EQUAL("host-b", connection->GetHost());
+        UNIT_ASSERT_VALUES_EQUAL(1, counters.NoMigrationTarget->Val());
+        UNIT_ASSERT_VALUES_EQUAL(2, counters.HostsUnavailable->Val());
     }
 }
 
