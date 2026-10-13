@@ -61,6 +61,8 @@ TMaybe<TInstant> ParseTimestamp(
     return ts;
 }
 
+////////////////////////////////////////////////////////////////////////////////
+
 bool TryRoundGrafanaTimestamp(
     TInstant current,
     char unit,

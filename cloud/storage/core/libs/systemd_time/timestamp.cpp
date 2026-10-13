@@ -6,13 +6,18 @@
 #include <limits>
 
 namespace NSystemdTime {
+
 namespace {
+
+////////////////////////////////////////////////////////////////////////////////
 
 constexpr ui64 Second = 1000000;
 constexpr ui64 Minute = 60 * Second;
 constexpr ui64 Hour = 60 * Minute;
 constexpr ui64 Day = 24 * Hour;
 constexpr ui64 MaxTimestamp = std::numeric_limits<ui64>::max();
+
+////////////////////////////////////////////////////////////////////////////////
 
 void SkipSpace(TStringBuf& input)
 {
@@ -56,6 +61,8 @@ bool ReadField(TStringBuf& input, int& value)
     value = number;
     return true;
 }
+
+////////////////////////////////////////////////////////////////////////////////
 
 // Evaluates a decimal fraction exactly, truncating below microsecond precision.
 // Working backwards avoids both floating point rounding and integer overflow.
@@ -177,6 +184,8 @@ bool ParseSpan(TStringBuf input, ui64& value)
     }
     return true;
 }
+
+////////////////////////////////////////////////////////////////////////////////
 
 bool ParseZone(TStringBuf input, NDatetime::TTimeZone& zone)
 {
@@ -377,6 +386,8 @@ bool ParseAbsolute(
     return true;
 }
 
+////////////////////////////////////////////////////////////////////////////////
+
 bool ApplyOffset(TInstant base, ui64 span, bool subtract, TInstant& result)
 {
     const ui64 reference = base.MicroSeconds();
@@ -416,6 +427,8 @@ bool ParseBase(
 }
 
 }   // namespace
+
+////////////////////////////////////////////////////////////////////////////////
 
 bool TryParseTimestamp(
     TStringBuf input,

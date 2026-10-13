@@ -8,6 +8,8 @@ namespace NCloud::NFileStore::NProfileTool {
 
 namespace {
 
+////////////////////////////////////////////////////////////////////////////////
+
 void AssertGrafanaRange(
     TStringBuf json,
     TStringBuf now,
@@ -34,6 +36,8 @@ void AssertGrafanaRange(
 }
 
 }   // namespace
+
+////////////////////////////////////////////////////////////////////////////////
 
 Y_UNIT_TEST_SUITE(TCommonFilterParamsTest)
 {

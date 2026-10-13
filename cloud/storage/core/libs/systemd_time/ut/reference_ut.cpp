@@ -3,7 +3,10 @@
 #include <library/cpp/testing/unittest/registar.h>
 
 namespace NSystemdTime {
+
 namespace {
+
+////////////////////////////////////////////////////////////////////////////////
 
 // Cases adapted from chrono-systemd-time to this parser's documented behavior.
 // Covers systemd-style calendar and relative timestamps plus parser extensions
@@ -41,6 +44,8 @@ void AssertReject(TStringBuf input)
 }
 
 }   // namespace
+
+////////////////////////////////////////////////////////////////////////////////
 
 Y_UNIT_TEST_SUITE(TChronoAdaptedCases)
 {

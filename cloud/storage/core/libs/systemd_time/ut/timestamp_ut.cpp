@@ -3,9 +3,14 @@
 #include <library/cpp/testing/unittest/registar.h>
 
 namespace NSystemdTime {
+
 namespace {
 
+////////////////////////////////////////////////////////////////////////////////
+
 const TInstant Now = TInstant::ParseIso8601("2012-11-23T10:15:22.123456Z");
+
+////////////////////////////////////////////////////////////////////////////////
 
 void AssertParse(TStringBuf input, TStringBuf expected)
 {
@@ -21,6 +26,8 @@ void AssertParse(TStringBuf input, TStringBuf expected)
 }
 
 }   // namespace
+
+////////////////////////////////////////////////////////////////////////////////
 
 Y_UNIT_TEST_SUITE(TTimestampParser)
 {
